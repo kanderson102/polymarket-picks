@@ -40,6 +40,16 @@ class TradingDB:
                 INSERT OR IGNORE INTO performance (id, baseline, total_harvested)
                 VALUES (1, 50.0, 0.0)
             """)
+
+            # Balance History Table to drive front-end chart
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS balance_history (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    date DATE DEFAULT CURRENT_DATE,
+                    balance REAL NOT NULL,
+                    harvested REAL DEFAULT 0.0
+                )
+            """)
             conn.commit()
 
     def add_trade(self, specialist: str, market: str, entry_price: float) -> int:
@@ -106,3 +116,38 @@ class TradingDB:
                 (new_baseline, harvested_amount)
             )
             conn.commit()
+
+    def get_all_recent_trades(self, limit: int = 50) -> List[Tuple]:
+        """Fetch the most recent trades across all specialists for global monitoring."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT specialist, market, entry_price, timestamp, result 
+                FROM trades 
+                ORDER BY timestamp DESC 
+                LIMIT ?
+                """,
+                (limit,)
+            )
+            return cursor.fetchall()
+            
+    def get_balance_history(self) -> List[Tuple]:
+        """Fetch balance history points for the chart."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT date, balance, harvested FROM balance_history ORDER BY date ASC"
+            )
+            return cursor.fetchall()
+
+    def add_balance_snapshot(self, current_balance: float, harvested_today: float = 0.0):
+        """Add a daily balance point for the history chart."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO balance_history (date, balance, harvested) VALUES (CURRENT_DATE, ?, ?)",
+                (current_balance, harvested_today)
+            )
+            conn.commit()
+

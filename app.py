@@ -23,18 +23,41 @@ def main():
     col3.metric("Total Harvested (to Main Wallet)", f"${harvested:.2f}")
 
     # Growth vs Harvest Chart
-    # Mocking historical growth over time for the UI
     st.subheader("Growth vs. Harvest")
-    chart_data = pd.DataFrame({
-        'Date': pd.date_range(start='1/1/2026', periods=5),
-        'Balance': [50, 65, 80, 105, 75],      # Hit 100+ -> Harvest triggers
-        'Harvested': [0, 0, 0, 25, 25]         # Harvested $25 to Main Wallet
-    }).set_index('Date')
-    st.line_chart(chart_data)
+    balance_history = db.get_balance_history()
+    
+    if balance_history:
+        # Aggregate by date if multiple entries per day
+        history_df = pd.DataFrame(balance_history, columns=['Date', 'Balance', 'Harvested'])
+        # Convert Date string to datetime for better plotting
+        history_df['Date'] = pd.to_datetime(history_df['Date'])
+        # Group by Date and take the last balance of the day, sum harvested
+        history_df = history_df.groupby('Date').agg({'Balance': 'last', 'Harvested': 'sum'})
+        st.line_chart(history_df)
+    else:
+        st.info("Awaiting sufficient data to plot balance history. The chart will appear here once the bot completes its first daily cycle.")
 
     st.markdown("---")
 
-    # 2. Specialist Roster & Health Monitor
+    # 2. Live Activity Log
+    st.header("Live Activity Log")
+    recent_trades = db.get_all_recent_trades(limit=20)
+    
+    col_active, col_empty = st.columns([1, 3])
+    active_positions = sum(1 for t in recent_trades if t[4] == 'PENDING') if recent_trades else 0
+    col_active.metric("Active Pending Positions", active_positions)
+    
+    if recent_trades:
+        trades_df = pd.DataFrame(recent_trades, columns=['Specialist', 'Market', 'Entry Price', 'Timestamp', 'Status'])
+        # Format Entry Price
+        trades_df['Entry Price'] = trades_df['Entry Price'].apply(lambda x: f"${x:.2f}")
+        st.dataframe(trades_df, use_container_width=True, hide_index=True)
+    else:
+        st.info("No trades executed yet. The bot is actively monitoring for opportunities.")
+
+    st.markdown("---")
+
+    # 3. Specialist Roster & Health Monitor
     st.header("Specialist Roster & Health")
     st.write("Toggle Alpha wallets to monitor and copy their trades on Polymarket.")
     

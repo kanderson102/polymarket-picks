@@ -2,10 +2,10 @@ from finance import FinanceController
 
 def run_tests():
     # 1. Test Bet Sizing
-    print("--- Testing Position Sizing (Quarter Kelly / 15%) ---")
+    print("--- Testing Position Sizing (5%) ---")
     size = FinanceController.calculate_bet_size(100.0)
-    print(f"Balance: $100 -> Expected Bet: $15.0 | Actual: ${size:.2f}")
-    assert size == 15.0
+    print(f"Balance: $100 -> Expected Bet: $5.00 | Actual: ${size:.2f}")
+    assert size == 5.0
 
     # 2. Test Harvest Logic (No Trigger)
     print("\n--- Testing Harvest Trigger (Below 2x) ---")

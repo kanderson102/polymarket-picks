@@ -21,9 +21,9 @@ class FinanceController:
     def calculate_bet_size(current_balance: float) -> float:
         """
         Dynamic Position Sizing.
-        Bet Size = Current USDC Balance * 0.15 (15%).
+        Bet Size = Current USDC Balance * 0.05 (5%).
         """
-        return current_balance * 0.15
+        return current_balance * 0.05
 
     @staticmethod
     def check_harvest(current_balance: float, baseline_capital: float) -> HarvestResult:
