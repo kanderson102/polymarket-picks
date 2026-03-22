@@ -25,6 +25,7 @@ class Specialist:
     wallet_address: str
     target_tags: list[str]
     tier: str
+    is_active: bool = True
 
 # Core Configuration Based on PRD
 # We leave an empty list here since specialists are now loaded dynamically from DB
@@ -54,22 +55,38 @@ class PolymarketBot:
         except Exception as e:
             logging.error(f"Failed to send Telegram alert: {e}")
 
+    def generate_hourly_summary(self):
+        exposure = self.db.get_total_pending_exposure()
+        balance = max(0.0, 50.0 - exposure)
+        
+        recent = self.db.get_all_recent_trades(limit=500)
+        wins = sum(1 for t in recent if t[4] == 'WON')
+        losses = sum(1 for t in recent if t[4] == 'LOST')
+        pending = sum(1 for t in recent if t[4] == 'PENDING')
+        
+        return f"📊 Hourly Bot Summary:\n\nAvailable USDC: ${balance:.2f}\nTotal Pending Exposure: ${exposure:.2f} across {pending} trades\n\nWins to Date: {wins}\nLosses to Date: {losses}\n\nThe bot will continue autonomously managing your portfolio balance safely."
+
     def monitor_loop(self):
         logging.info("Starting real-time Gamma API polling loop...")
         self.send_telegram_alert("🚀 Polymarket Copy-Bot Started and Monitoring!")
+        last_summary_time = time.time()
         
         while True:
             try:
-                # Heartbeat
                 self.db.record_heartbeat()
                 
-                # Fetch fresh specialist definitions from DB
+                # Check for hourly summary trigger
+                if time.time() - last_summary_time >= 3600:
+                    summary_msg = self.generate_hourly_summary()
+                    self.send_telegram_alert(summary_msg)
+                    last_summary_time = time.time()
+                
                 db_specs = self.db.get_all_specialists()
-                dynamic_specialists = [Specialist(s["name"], s["wallet"], s["tags"], s.get("tier", "SHARP")) for s in db_specs]
+                dynamic_specialists = [Specialist(s["name"], s["wallet"], s["tags"], s.get("tier", "SHARP"), s.get("is_active", True)) for s in db_specs]
                 
                 for spec in dynamic_specialists:
-                    if "MOCK" in spec.wallet_address:
-                        continue # Skip placeholders if they exist
+                    if not spec.is_active or "MOCK" in spec.wallet_address:
+                        continue 
                         
                     # Query specialist positions using Polymarket Data API
                     resp = requests.get(f"{DATA_API_URL}/positions?user={spec.wallet_address}", timeout=10)
@@ -94,9 +111,11 @@ class PolymarketBot:
                                         self.seen_positions.add(pos_id)
                                         # Inject real trade object back to Database
                                         self.db.add_trade(spec.name, market, price)
-                                        msg = f"✅ COPIED TRADE\nSpecialist: {spec.name}\nMarket: {market}\nEntry: ${price:.2f}"
-                                        self.send_telegram_alert(msg)
-                                        logging.info(msg)
+                                        
+                                        # REMOVED: Individual Telegram Pings to avoid extreme spamming when copying highly active wallets
+                                        # These are aggregated hourly now instead
+                                        
+                                        logging.info(f"✅ COPIED TRADE Specialist: {spec.name} Market: {market} Entry: ${price:.2f}")
                                         
                                     elif status == "PERMANENT_REJECT":
                                         self.seen_positions.add(pos_id)
@@ -157,9 +176,16 @@ class PolymarketBot:
             return "TEMPORARY_REJECT", f"Price slipped too far from Leader's price of {leader_price}"
 
         # 5. Position Sizing
-        # Mocking balance fetch for Phase 1 Validation (hardcoded to Phase 1's $50 USDC)
-        current_wallet_balance = 50.0 
-        bet_size = FinanceController.calculate_bet_size(current_wallet_balance, specialist.tier, win_rate)
+        # Mocking balance fetch for Phase 1 Validation dynamically via Local exposure
+        current_wallet_balance = max(0.0, 50.0 - self.db.get_total_pending_exposure())
+        
+        if current_wallet_balance < 1.0:
+            return "TEMPORARY_REJECT", "Insufficient Phase 1 Budget (Active Bet Exposure Maxed)"
+            
+        # Calculate bet size using baseline 50 for generic scaling math, but clamp to available balance so it halts naturally
+        bet_size = FinanceController.calculate_bet_size(50.0, specialist.tier, win_rate)
+        if bet_size > current_wallet_balance:
+            bet_size = current_wallet_balance
 
         return "PASSED", f"Validated for ${bet_size:.2f} bet"
 

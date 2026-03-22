@@ -59,9 +59,10 @@ def render_dashboard(db):
     st.header("Financial Performance")
     col1, col2, col3 = st.columns(3)
     
-    # For Phase 1 we mock the current wallet balance here as $50
-    current_wallet_balance = 50.0  
-    profit = current_wallet_balance - baseline if current_wallet_balance > baseline else 0
+    # For Phase 1 we calculate available balance based on pending exposure
+    exposure = db.get_total_pending_exposure()
+    current_wallet_balance = 50.0 - exposure
+    profit = (current_wallet_balance + exposure) - baseline if (current_wallet_balance + exposure) > baseline else 0
     
     col1.metric("Current Balance (USDC)", f"${current_wallet_balance:.2f}", f"${profit:.2f} profit")
     col2.metric("Baseline Capital", f"${baseline:.2f}")
@@ -170,8 +171,13 @@ def render_dashboard(db):
                     st.success(f"Win Rate: {win_rate}%")
                 else:
                     st.error(f"Probation ({win_rate}% < {min_win_rate}%)")
+                
+                # Read actual toggle state from DB
+                is_active_val = spec.get('is_active', True)
             with c4:
-                st.toggle("Active", value=(win_rate >= min_win_rate), key=f"tgl_{spec['name']}")
+                def toggle_act(n=spec['name']):
+                    db.set_specialist_active(n, st.session_state[f"tgl_{n}"])
+                st.toggle("Active", value=is_active_val, key=f"tgl_{spec['name']}", on_change=toggle_act)
             with c5:
                 if st.button("✏️", key=f"edit_btn_{spec['name']}"):
                     st.session_state[f"edit_{spec['name']}"] = not st.session_state.get(f"edit_{spec['name']}", False)
@@ -179,18 +185,23 @@ def render_dashboard(db):
                 if st.button("🗑️", key=f"del_btn_{spec['name']}"):
                     st.session_state[f"confirm_delete_{spec['name']}"] = True
                     
-        # Edit Wallet inline form
+        # Edit inline form
         if st.session_state.get(f"edit_{spec['name']}", False):
             with st.container():
-                col_w1, col_w2 = st.columns([4, 1])
+                col_w1, col_w2, col_w3 = st.columns([2, 2, 1])
                 with col_w1:
-                    new_wallet_val = st.text_input("Update Wallet Address (0x...)", value=spec['wallet'], key=f"in_{spec['name']}")
+                    new_wallet_val = st.text_input("Update Wallet Address", value=spec['wallet'], key=f"in_{spec['name']}")
                 with col_w2:
+                    current_mapped = [TAG_MAP[t] for t in spec['tags'] if t in TAG_MAP]
+                    selected_cats = st.multiselect("Update Categories", list(TAG_MAP.values()), default=current_mapped, key=f"tg_{spec['name']}")
+                with col_w3:
                     st.write("") # Spacing down
                     st.write("") 
                     if st.button("Save", key=f"save_{spec['name']}"):
-                        if new_wallet_val:
+                        new_tags_val = ",".join([REVERSE_TAG_MAP[c] for c in selected_cats])
+                        if new_wallet_val and new_tags_val:
                             db.update_specialist_wallet(spec['name'], new_wallet_val)
+                            db.update_specialist_tags(spec['name'], new_tags_val)
                             st.session_state[f"edit_{spec['name']}"] = False
                             st.rerun()
 

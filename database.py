@@ -52,10 +52,17 @@ class TradingDB:
                     name TEXT UNIQUE NOT NULL,
                     wallet_address TEXT NOT NULL,
                     target_tags TEXT NOT NULL,
-                    tier TEXT DEFAULT 'SHARP'
+                    tier TEXT DEFAULT 'SHARP',
+                    is_active BOOLEAN DEFAULT 1
                 )
             """)
             
+            # Migration for existing DBs
+            try:
+                cursor.execute("ALTER TABLE specialists ADD COLUMN is_active BOOLEAN DEFAULT 1")
+            except sqlite3.OperationalError:
+                pass # Column already exists
+
             # Populate with defaults if empty
             cursor.execute("SELECT COUNT(*) FROM specialists")
             if cursor.fetchone()[0] == 0:
@@ -209,9 +216,9 @@ class TradingDB:
     def get_all_specialists(self) -> List[dict]:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT name, wallet_address, target_tags, tier FROM specialists")
+            cursor.execute("SELECT name, wallet_address, target_tags, tier, is_active FROM specialists")
             rows = cursor.fetchall()
-            return [{"name": r[0], "wallet": r[1], "tags": r[2].split(','), "tier": r[3]} for r in rows]
+            return [{"name": r[0], "wallet": r[1], "tags": r[2].split(','), "tier": r[3], "is_active": bool(r[4])} for r in rows]
             
     def add_specialist(self, name: str, wallet: str, tags: str, tier: str = 'SHARP'):
         with sqlite3.connect(self.db_path) as conn:
@@ -230,6 +237,25 @@ class TradingDB:
             cursor = conn.cursor()
             cursor.execute("UPDATE specialists SET wallet_address = ? WHERE name = ?", (new_wallet, name))
             conn.commit()
+
+    def update_specialist_tags(self, name: str, new_tags: str):
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE specialists SET target_tags = ? WHERE name = ?", (new_tags, name))
+            conn.commit()
+            
+    def set_specialist_active(self, name: str, is_active: bool):
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE specialists SET is_active = ? WHERE name = ?", (int(is_active), name))
+            conn.commit()
+            
+    def get_total_pending_exposure(self) -> float:
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT sum(entry_price) FROM trades WHERE result = 'PENDING'")
+            res = cursor.fetchone()[0]
+            return float(res) if res else 0.0
 
     def record_heartbeat(self):
         with sqlite3.connect(self.db_path) as conn:
