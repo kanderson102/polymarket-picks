@@ -37,5 +37,8 @@ jobs:
             docker stop polybot || true
             docker rm polybot || true
             
-            # Run fresh container with mapped .env file
-            docker run -d --name polybot -p 8501:8501 --env-file .env --restart unless-stopped polymarket-bot
+            # Touch the db file safely on host so Docker mounts it as a file, not a dir
+            touch trading.db
+            
+            # Run fresh container with mapped .env file and persistent database
+            docker run -d --name polybot -p 8501:8501 --env-file .env -v $(pwd)/trading.db:/app/trading.db --restart unless-stopped polymarket-bot

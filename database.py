@@ -26,9 +26,16 @@ class TradingDB:
                     market TEXT NOT NULL,
                     entry_price REAL NOT NULL,
                     timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    result TEXT DEFAULT 'PENDING'
+                    result TEXT DEFAULT 'PENDING',
+                    slug TEXT DEFAULT ''
                 )
             """)
+            
+            # Migration
+            try:
+                cursor.execute("ALTER TABLE trades ADD COLUMN slug TEXT DEFAULT ''")
+            except sqlite3.OperationalError:
+                pass
             
             # Performance Table
             cursor.execute("""
@@ -99,12 +106,12 @@ class TradingDB:
             """)
             conn.commit()
 
-    def add_trade(self, specialist: str, market: str, entry_price: float) -> int:
+    def add_trade(self, specialist: str, market: str, entry_price: float, slug: str = "") -> int:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "INSERT INTO trades (specialist, market, entry_price) VALUES (?, ?, ?)",
-                (specialist, market, entry_price)
+                "INSERT INTO trades (specialist, market, entry_price, slug) VALUES (?, ?, ?, ?)",
+                (specialist, market, entry_price, slug)
             )
             conn.commit()
             return cursor.lastrowid
@@ -153,7 +160,7 @@ class TradingDB:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT market, entry_price, timestamp, result 
+                SELECT market, entry_price, timestamp, result, slug 
                 FROM trades 
                 WHERE specialist = ? 
                 ORDER BY timestamp DESC
@@ -185,7 +192,7 @@ class TradingDB:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT specialist, market, entry_price, timestamp, result 
+                SELECT specialist, market, entry_price, timestamp, result, slug 
                 FROM trades 
                 ORDER BY timestamp DESC 
                 LIMIT ?

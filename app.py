@@ -108,9 +108,19 @@ def render_dashboard(db):
     col_active.metric("Active Pending Positions", active_positions)
     
     if recent_trades:
-        trades_df = pd.DataFrame(recent_trades[:20], columns=['Specialist', 'Market', 'Entry Price', 'Timestamp', 'Status'])
+        trades_df = pd.DataFrame(recent_trades[:20], columns=['Specialist', 'Market', 'Entry Price', 'Timestamp', 'Status', 'Slug'])
         trades_df['Entry Price'] = trades_df['Entry Price'].apply(lambda x: f"${x:.2f}")
-        st.dataframe(trades_df, use_container_width=True, hide_index=True)
+        trades_df['Link'] = trades_df['Slug'].apply(lambda x: f"https://polymarket.com/event/{x}" if x else "")
+        trades_df = trades_df.drop(columns=['Slug'])
+        
+        st.dataframe(
+            trades_df, 
+            use_container_width=True, 
+            hide_index=True,
+            column_config={
+                "Link": st.column_config.LinkColumn("Polymarket", display_text="Open ↗")
+            }
+        )
     else:
         st.info("No trades executed yet.")
 
@@ -209,15 +219,24 @@ def render_dashboard(db):
         with st.expander(f"📊 View Bot's Trade History for {spec['name']}"):
             spec_trades = db.get_specialist_all_trades(spec['name'])
             if spec_trades:
-                tdf = pd.DataFrame(spec_trades, columns=['Market', 'Entry Price', 'Timestamp', 'Result'])
+                tdf = pd.DataFrame(spec_trades, columns=['Market', 'Entry Price', 'Timestamp', 'Result', 'Slug'])
                 tdf['Entry Price'] = tdf['Entry Price'].apply(lambda x: f"${x:.2f}")
+                tdf['Link'] = tdf['Slug'].apply(lambda x: f"https://polymarket.com/event/{x}" if x else "")
+                tdf = tdf.drop(columns=['Slug'])
                 
                 wins = sum(1 for t in spec_trades if t[3] == "WON")
                 losses = sum(1 for t in spec_trades if t[3] == "LOST")
                 pending = sum(1 for t in spec_trades if t[3] == "PENDING")
                 st.write(f"**Local Bot Stats:** {wins} Wins | {losses} Losses | {pending} Pending")
                 
-                st.dataframe(tdf, use_container_width=True, hide_index=True)
+                st.dataframe(
+                    tdf, 
+                    use_container_width=True, 
+                    hide_index=True,
+                    column_config={
+                        "Link": st.column_config.LinkColumn("Polymarket", display_text="Open ↗")
+                    }
+                )
             else:
                 st.info("The bot hasn't executed any trades for this specialist yet.")
                         

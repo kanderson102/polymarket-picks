@@ -95,11 +95,11 @@ class PolymarketBot:
                         for pos in positions:
                             pos_id = pos.get('asset', '')
                             
-                            # Standard delta-detection
                             if pos_id and pos_id not in self.seen_positions:
                                 size = float(pos.get('size', 0))
                                 price = float(pos.get('avgPrice', 0))
                                 market = pos.get('title', 'Unknown Market')
+                                slug = pos.get('slug', '')
                                 
                                 if size > 0:
                                     # Fallback tag: Use the specialist's primary domain to allow Phase 1 simulation checks to execute.
@@ -110,7 +110,7 @@ class PolymarketBot:
                                     if status == "PASSED":
                                         self.seen_positions.add(pos_id)
                                         # Inject real trade object back to Database
-                                        self.db.add_trade(spec.name, market, price)
+                                        self.db.add_trade(spec.name, market, price, slug)
                                         
                                         # REMOVED: Individual Telegram Pings to avoid extreme spamming when copying highly active wallets
                                         # These are aggregated hourly now instead
