@@ -44,7 +44,7 @@ def render_dashboard(db):
     st.title("📈 Polymarket Specialist Copy-Bot")
     
     # Use standard dotenv to grab the bot's public proxy
-    bot_address = os.environ.get("BOT_WALLET_ADDRESS")
+    bot_address = os.environ.get("BOT_WALLET_ADDRESS", "").strip("\"'")
     
     if bot_address:
          st.markdown(f"**[🤖 View Bot's Live Polymarket Profile](https://polymarket.com/profile/{bot_address})**")
