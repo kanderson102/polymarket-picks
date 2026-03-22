@@ -67,6 +67,11 @@ def render_dashboard(db):
     col1.metric("Current Balance (USDC)", f"${current_wallet_balance:.2f}", f"${profit:.2f} profit")
     col2.metric("Baseline Capital", f"${baseline:.2f}")
     col3.metric("Total Harvested (to Main Wallet)", f"${harvested:.2f}")
+    
+    st.write("")
+    if st.button("🧹 Purge All Pending Trades (Reset Simulator Budget)", help="Clears all active pending trades from the local database to reset your paper balance back to original budget."):
+        db.clear_all_pending_trades()
+        st.rerun()
 
     # Growth vs Harvest Chart
     st.subheader("Growth vs. Harvest")

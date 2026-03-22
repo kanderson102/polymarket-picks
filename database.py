@@ -201,6 +201,13 @@ class TradingDB:
             )
             return cursor.fetchall()
             
+    def clear_all_pending_trades(self):
+        """Purge all pending trades from the simulation to free up paper capital."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM trades WHERE result = 'PENDING'")
+            conn.commit()
+            
     def get_balance_history(self) -> List[Tuple]:
         """Fetch balance history points for the chart."""
         with sqlite3.connect(self.db_path) as conn:
