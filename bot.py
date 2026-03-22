@@ -30,7 +30,7 @@ class Specialist:
 # We leave an empty list here since specialists are now loaded dynamically from DB
 SPECIALISTS = []
 
-GAMMA_API_URL = "https://gamma-api.polymarket.com"
+DATA_API_URL = "https://data-api.polymarket.com"
 CLOB_URL = "https://clob.polymarket.com"
 
 class PolymarketBot:
@@ -71,18 +71,18 @@ class PolymarketBot:
                     if "MOCK" in spec.wallet_address:
                         continue # Skip placeholders if they exist
                         
-                    # Query specialist positions
-                    resp = requests.get(f"{GAMMA_API_URL}/positions?user={spec.wallet_address}", timeout=10)
+                    # Query specialist positions using Polymarket Data API
+                    resp = requests.get(f"{DATA_API_URL}/positions?user={spec.wallet_address}", timeout=10)
                     if resp.status_code == 200:
                         positions = resp.json()
                         for pos in positions:
-                            pos_id = pos.get('id', '')
+                            pos_id = pos.get('asset', '')
                             
                             # Standard delta-detection
                             if pos_id and pos_id not in self.seen_positions:
                                 size = float(pos.get('size', 0))
                                 price = float(pos.get('avgPrice', 0))
-                                market = pos.get('asset', 'Unknown Market')
+                                market = pos.get('title', 'Unknown Market')
                                 
                                 if size > 0:
                                     # Fallback tag 100381 (NBA) used to force full PRD validation logic
@@ -111,6 +111,8 @@ class PolymarketBot:
                                             msg = f"⏳ WAITING (Price too high) {spec.name}. Watching for dip. Reason: {msg_reason}. Market: {market}"
                                             self.send_telegram_alert(msg)
                                             logging.info(msg)
+                    else:
+                        logging.warning(f"Failed to fetch positions for {spec.name}: API returned HTTP {resp.status_code}")
             except Exception as e:
                 logging.error(f"Error in monitor loop: {e}")
                 self.send_telegram_alert(f"🚨 CRITICAL ERROR in monitor_loop: {e}")
