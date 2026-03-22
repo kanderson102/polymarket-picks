@@ -44,8 +44,8 @@ class PolymarketBot:
         logging.info(f"🤖 Bot Initialized. Current Run Baseline: ${baseline}")
 
     def send_telegram_alert(self, message: str):
-        token = os.environ.get("TELEGRAM_BOT_TOKEN")
-        chat_id = os.environ.get("TELEGRAM_CHAT_ID")
+        token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip("\"'")
+        chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip("\"'")
         if not token or not chat_id:
             return
         try:
@@ -85,9 +85,10 @@ class PolymarketBot:
                                 market = pos.get('title', 'Unknown Market')
                                 
                                 if size > 0:
-                                    # Fallback tag 100381 (NBA) used to force full PRD validation logic
+                                    # Fallback tag: Use the specialist's primary domain to allow Phase 1 simulation checks to execute.
                                     # We mock leader price as price * 0.98 for the Phase 1 test
-                                    status, msg_reason = self.execute_trade_logic(spec, "100381", price, price * 0.98, market)
+                                    assumed_tag = spec.target_tags[0] if spec.target_tags else "100381"
+                                    status, msg_reason = self.execute_trade_logic(spec, assumed_tag, price, price * 0.98, market)
                                     
                                     if status == "PASSED":
                                         self.seen_positions.add(pos_id)
