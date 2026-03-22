@@ -2,7 +2,10 @@ import time
 import requests
 import os
 import logging
+from dotenv import load_dotenv
 from finance import FinanceController
+
+load_dotenv()
 from database import TradingDB
 from dataclasses import dataclass
 
