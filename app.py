@@ -84,22 +84,6 @@ def render_dashboard(db):
 
     # 2. Live Activity Log
     st.header("Live Activity Log")
-    
-    # Human readable view above
-    st.subheader("Recent Highlights")
-    log_path = os.path.join(os.path.dirname(__file__), "polymarket_bot.log")
-    if os.path.exists(log_path):
-        with open(log_path, "r") as f:
-            lines = f.readlines()
-        highlights = [l.strip() for l in lines if "✅" in l or "⚠️" in l or "🚨" in l]
-        if highlights:
-            for hl in highlights[-3:][::-1]: # show last 3 highlights
-                st.write(f"- {hl}")
-        else:
-            st.write("No major highlights yet.")
-    else:
-        st.write("Log file not created yet.")
-        
     st.write("")
     
     recent_trades = db.get_all_recent_trades(limit=1000)
@@ -287,7 +271,8 @@ def render_logs():
     log_path = os.path.join(os.path.dirname(__file__), "polymarket_bot.log")
     if os.path.exists(log_path):
         with open(log_path, "r") as f:
-            log_content = f.read()
+            lines = f.readlines()
+        log_content = "".join(reversed(lines))
         st.text_area("Live bot output", log_content, height=600)
     else:
         st.info("Log file does not exist yet. Run the bot to generate logs.")

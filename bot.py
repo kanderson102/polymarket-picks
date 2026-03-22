@@ -8,6 +8,7 @@ from finance import FinanceController
 load_dotenv()
 from database import TradingDB
 from dataclasses import dataclass
+from datetime import datetime
 
 # Set up logging to both console and a file
 logging.basicConfig(
@@ -102,6 +103,24 @@ class PolymarketBot:
                                 slug = pos.get('slug', '')
                                 
                                 if size > 0:
+                                    # Date constraint logic (Reject >7 days out, Reject past markets)
+                                    endDate_str = pos.get('endDate', '')
+                                    if endDate_str:
+                                        try:
+                                            date_part = endDate_str.split('T')[0] if 'T' in endDate_str else endDate_str
+                                            end_dt = datetime.strptime(date_part, "%Y-%m-%d")
+                                            now = datetime.now()
+                                            
+                                            if end_dt < now:
+                                                self.seen_positions.add(pos_id)
+                                                continue # Skip past matches (resolution delays)
+                                                
+                                            if (end_dt - now).days > 7:
+                                                self.seen_positions.add(pos_id)
+                                                continue # Skip long-term capital lockup
+                                        except ValueError:
+                                            pass
+                                            
                                     # Fallback tag: Use the specialist's primary domain to allow Phase 1 simulation checks to execute.
                                     # We mock leader price as price * 0.98 for the Phase 1 test
                                     assumed_tag = spec.target_tags[0] if spec.target_tags else "100381"
@@ -112,9 +131,8 @@ class PolymarketBot:
                                         # Inject real trade object back to Database
                                         self.db.add_trade(spec.name, market, price, slug)
                                         
-                                        # REMOVED: Individual Telegram Pings to avoid extreme spamming when copying highly active wallets
-                                        # These are aggregated hourly now instead
-                                        
+                                        msg = f"✅ COPIED TRADE\nSpecialist: {spec.name}\nMarket: {market}\nEntry: ${price:.2f}"
+                                        self.send_telegram_alert(msg)
                                         logging.info(f"✅ COPIED TRADE Specialist: {spec.name} Market: {market} Entry: ${price:.2f}")
                                         
                                     elif status == "PERMANENT_REJECT":
