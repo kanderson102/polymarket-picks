@@ -129,7 +129,6 @@ class PolymarketBot:
                                         if pos_id not in self.watched_positions:
                                             self.watched_positions.add(pos_id)
                                             msg = f"⏳ WAITING (Price too high) {spec.name}. Watching for dip. Reason: {msg_reason}. Market: {market}"
-                                            self.send_telegram_alert(msg)
                                             logging.info(msg)
                     else:
                         logging.warning(f"Failed to fetch positions for {spec.name}: API returned HTTP {resp.status_code}")
@@ -179,8 +178,8 @@ class PolymarketBot:
         # Mocking balance fetch for Phase 1 Validation dynamically via Local exposure
         current_wallet_balance = max(0.0, 50.0 - self.db.get_total_pending_exposure())
         
-        if current_wallet_balance < 1.0:
-            return "TEMPORARY_REJECT", "Insufficient Phase 1 Budget (Active Bet Exposure Maxed)"
+        if current_wallet_balance < 5.0:
+            return "TEMPORARY_REJECT", "Insufficient Buffer (Bankroll hit $5.00 fail-safe)"
             
         # Calculate bet size using baseline 50 for generic scaling math, but clamp to available balance so it halts naturally
         bet_size = FinanceController.calculate_bet_size(50.0, specialist.tier, win_rate)

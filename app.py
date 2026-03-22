@@ -102,13 +102,13 @@ def render_dashboard(db):
         
     st.write("")
     
-    recent_trades = db.get_all_recent_trades(limit=20)
+    recent_trades = db.get_all_recent_trades(limit=1000)
     col_active, col_empty = st.columns([1, 3])
     active_positions = sum(1 for t in recent_trades if t[4] == 'PENDING') if recent_trades else 0
     col_active.metric("Active Pending Positions", active_positions)
     
     if recent_trades:
-        trades_df = pd.DataFrame(recent_trades, columns=['Specialist', 'Market', 'Entry Price', 'Timestamp', 'Status'])
+        trades_df = pd.DataFrame(recent_trades[:20], columns=['Specialist', 'Market', 'Entry Price', 'Timestamp', 'Status'])
         trades_df['Entry Price'] = trades_df['Entry Price'].apply(lambda x: f"${x:.2f}")
         st.dataframe(trades_df, use_container_width=True, hide_index=True)
     else:
