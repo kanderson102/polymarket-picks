@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# Activate the isolated virtual environment
+source .venv/bin/activate
+
 # Start the Python bot in the background
 echo "Starting Polymarket Specialist Copy-Bot..."
 python3 bot.py &

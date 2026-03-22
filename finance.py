@@ -2,7 +2,6 @@
 # Core financial math for the Polymarket Copy-Bot
 
 from dataclasses import dataclass
-from typing import Tuple
 
 @dataclass
 class HarvestResult:
@@ -18,12 +17,22 @@ class FinanceController:
     """
     
     @staticmethod
-    def calculate_bet_size(current_balance: float) -> float:
+    def calculate_bet_size(current_balance: float, tier: str, win_rate: float) -> float:
         """
         Dynamic Position Sizing.
-        Bet Size = Current USDC Balance * 0.05 (5%).
+        Automatically scales portfolio capital towards sharp traders over time.
+        Whales get a lower base allocation (2%) to balance out their higher variance, 
+        but large enough to clear gas fees. Sharp traders get a standard allocation (1%).
         """
-        return current_balance * 0.05
+        # Base capital percentage
+        # Testing conservative allocations: Sharp traders start at 1%, Whales at 2%
+        base_percent = 0.01 if tier == 'SHARP' else 0.02
+        
+        # Scale the bet size dynamically by their historical win rate
+        # A 75% win rate grinder will place 1.5x larger bets automatically
+        win_rate_multiplier = (win_rate / 50.0) if win_rate > 0 else 1.0
+        
+        return current_balance * base_percent * win_rate_multiplier
 
     @staticmethod
     def check_harvest(current_balance: float, baseline_capital: float) -> HarvestResult:
@@ -72,7 +81,10 @@ class FinanceController:
             "100102": 0.60,  # UCL
             "100383": 0.65,  # MLB
             "100384": 0.65,  # NHL
-            "100401": 0.65   # Tennis
+            "100401": 0.65,  # Tennis
+            "100601": 0.90,  # Tech (High Probability setups)
+            "100701": 0.55,  # Politics (High Volatility)
+            "100801": 0.60   # Pop Culture
         }
         
         return tag_limits.get(str(tag_id), 0.50)  # Default fallback 0.50
