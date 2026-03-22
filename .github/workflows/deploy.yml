@@ -1,0 +1,41 @@
+name: Deploy to Hetzner
+
+on:
+  push:
+    branches: [ "main" ]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Deploy to VPS
+        uses: appleboy/ssh-action@v1.0.3
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: root
+          password: ${{ secrets.SERVER_PASSWORD }}
+          envs: GH_PAT
+          script: |
+            # Clone if it doesn't exist
+            if [ ! -d "~/polymarket-picks" ]; then
+              git clone https://kanderson102:${GH_PAT}@github.com/kanderson102/polymarket-picks.git ~/polymarket-picks
+            fi
+            
+            # Navigate to directory and pull latest
+            cd ~/polymarket-picks
+            git remote set-url origin https://kanderson102:${GH_PAT}@github.com/kanderson102/polymarket-picks.git
+            git fetch --all
+            git reset --hard origin/main
+            
+            # Rebuild Docker Image
+            docker build -t polymarket-bot .
+            
+            # Stop existing container
+            docker stop polybot || true
+            docker rm polybot || true
+            
+            # Run fresh container with mapped .env file
+            docker run -d --name polybot -p 8501:8501 --env-file .env --restart unless-stopped polymarket-bot
