@@ -4,27 +4,24 @@ This outlines the infrastructure and deployment pipeline for running the copy-bo
 
 ## Architecture Diagram
 
-```mermaid
-graph TD
-    subgraph Local Development Mac
-        A[VS Code: database.py] -->|Git Commit & Push| B(GitHub Repository)
-        A -.-> C[(Local trading.db)]
-        D[Local Streamlit Dashboard] --> C
-        E[Local bot.py test loop] --> C
-    end
+**1. Local Development Mac**
+* **Code & Data**: You edit files like `database.py` in VS Code. `trading.db` is stored locally for testing.
+* **Testing**: You run the Streamlit Dashboard and the `bot.py` loop locally to verify changes.
+* **Deployment**: You run `git commit` and `git push` to send your code to the GitHub Repository.
 
-    subgraph Hetzner Production Server
-        B -->|Git Pull| F[Hetzner database.py]
-        F -->|Auto-Builds| G[(Live Production trading.db)]
-        H[Live Streamlit UI] --> G
-        I[Live Copy-Bot daemon] --> G
-        J[.env API/Private Keys] -.-> I
-    end
-    
-    I -->|Gamma API Scans| K[Polymarket Protocol]
-    I -->|CLOB API Trades| K
-    I -->|Harvest Transfers| L[User's Main Safety Wallet]
-```
+**2. GitHub Actions (Automated CI/CD)**
+* **Trigger**: A push to the `main` branch automatically alerts the Hetzner server to pull new changes.
+* **Action**: Hetzner safely stops the current bot, rebuilds its Docker container, and pulls your latest code from GitHub.
+
+**3. Hetzner Production Server**
+* **Environment Variables**: The `.env` file (containing API/Private Keys) lives ONLY on the server and maps securely to the Docker instance.
+* **Database**: `trading.db` runs live inside the container, tracking real trades.
+* **Execution**: The Live Streamlit UI and Live Copy-Bot Daemon pull directly from this live `trading.db`. 
+
+**4. External Protocols**
+* The live Daemon scans the **Polymarket Protocol (Gamma API)** for open positions.
+* It executes orders via the **CLOB API**.
+* Profits are successfully transferred out to the **User's Main Safety Wallet**.
 
 ## Local vs Remote Workflow (Best Practices)
 
