@@ -1,7 +1,8 @@
 #!/bin/bash
 
-# Activate the isolated virtual environment
-source .venv/bin/activate
+# Run any pending DB migrations/fixes (idempotent - safe to re-run)
+echo "Running DB migrations..."
+python3 fix_slugs.py
 
 # Start the Python bot in the background
 echo "Starting Polymarket Specialist Copy-Bot..."
