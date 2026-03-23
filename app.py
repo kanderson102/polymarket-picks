@@ -97,11 +97,12 @@ def render_dashboard(db):
     col_active.metric("Active Pending Positions", active_positions)
     
     if recent_trades:
-        trades_df = pd.DataFrame(recent_trades[:20], columns=['Specialist', 'Market', 'Entry Price', 'Timestamp', 'Status', 'Slug', 'Outcome', 'Bet Size'])
+        trades_df = pd.DataFrame(recent_trades[:20], columns=['Specialist', 'Market', 'Entry Price', 'Timestamp', 'Status', 'Slug', 'Side', 'Bet Size'])
         trades_df['Entry Price'] = trades_df['Entry Price'].apply(lambda x: f"${x:.2f}")
-        trades_df['Bet Size'] = trades_df['Bet Size'].apply(lambda x: f"${x:.2f}" if x else "$0.00")
+        trades_df['Bet Size'] = trades_df['Bet Size'].apply(lambda x: f"${x:.2f}" if x and x > 0 else "—")
         trades_df['Link'] = trades_df['Slug'].apply(lambda x: f"https://polymarket.com/event/{x}" if x else "")
-        trades_df = trades_df.drop(columns=['Slug'])
+        # Reorder: Specialist, Market, Side, Entry Price, Bet Size, Status, Timestamp, Link
+        trades_df = trades_df[['Specialist', 'Market', 'Side', 'Entry Price', 'Bet Size', 'Status', 'Timestamp', 'Link']]
         
         st.dataframe(
             trades_df, 
@@ -209,11 +210,12 @@ def render_dashboard(db):
         with st.expander(f"📊 View Bot's Trade History for {spec['name']}"):
             spec_trades = db.get_specialist_all_trades(spec['name'])
             if spec_trades:
-                tdf = pd.DataFrame(spec_trades, columns=['Market', 'Entry Price', 'Timestamp', 'Result', 'Slug', 'Outcome', 'Bet Size'])
+                tdf = pd.DataFrame(spec_trades, columns=['Market', 'Entry Price', 'Timestamp', 'Result', 'Slug', 'Side', 'Bet Size'])
                 tdf['Entry Price'] = tdf['Entry Price'].apply(lambda x: f"${x:.2f}")
-                tdf['Bet Size'] = tdf['Bet Size'].apply(lambda x: f"${x:.2f}" if x else "$0.00")
+                tdf['Bet Size'] = tdf['Bet Size'].apply(lambda x: f"${x:.2f}" if x and x > 0 else "—")
                 tdf['Link'] = tdf['Slug'].apply(lambda x: f"https://polymarket.com/event/{x}" if x else "")
-                tdf = tdf.drop(columns=['Slug'])
+                # Reorder columns
+                tdf = tdf[['Market', 'Side', 'Entry Price', 'Bet Size', 'Result', 'Timestamp', 'Link']]
                 
                 wins = sum(1 for t in spec_trades if t[3] == "WON")
                 losses = sum(1 for t in spec_trades if t[3] == "LOST")

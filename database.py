@@ -272,7 +272,8 @@ class TradingDB:
     def get_total_pending_exposure(self) -> float:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT sum(bet_size) FROM trades WHERE result = 'PENDING'")
+            # Use bet_size when available, fall back to entry_price for old trades
+            cursor.execute("SELECT sum(CASE WHEN bet_size > 0 THEN bet_size ELSE entry_price END) FROM trades WHERE result = 'PENDING'")
             res = cursor.fetchone()[0]
             return float(res) if res else 0.0
 
