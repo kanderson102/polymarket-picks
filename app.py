@@ -97,8 +97,9 @@ def render_dashboard(db):
     col_active.metric("Active Pending Positions", active_positions)
     
     if recent_trades:
-        trades_df = pd.DataFrame(recent_trades[:20], columns=['Specialist', 'Market', 'Entry Price', 'Timestamp', 'Status', 'Slug'])
+        trades_df = pd.DataFrame(recent_trades[:20], columns=['Specialist', 'Market', 'Entry Price', 'Timestamp', 'Status', 'Slug', 'Outcome', 'Bet Size'])
         trades_df['Entry Price'] = trades_df['Entry Price'].apply(lambda x: f"${x:.2f}")
+        trades_df['Bet Size'] = trades_df['Bet Size'].apply(lambda x: f"${x:.2f}" if x else "$0.00")
         trades_df['Link'] = trades_df['Slug'].apply(lambda x: f"https://polymarket.com/event/{x}" if x else "")
         trades_df = trades_df.drop(columns=['Slug'])
         
@@ -208,8 +209,9 @@ def render_dashboard(db):
         with st.expander(f"📊 View Bot's Trade History for {spec['name']}"):
             spec_trades = db.get_specialist_all_trades(spec['name'])
             if spec_trades:
-                tdf = pd.DataFrame(spec_trades, columns=['Market', 'Entry Price', 'Timestamp', 'Result', 'Slug'])
+                tdf = pd.DataFrame(spec_trades, columns=['Market', 'Entry Price', 'Timestamp', 'Result', 'Slug', 'Outcome', 'Bet Size'])
                 tdf['Entry Price'] = tdf['Entry Price'].apply(lambda x: f"${x:.2f}")
+                tdf['Bet Size'] = tdf['Bet Size'].apply(lambda x: f"${x:.2f}" if x else "$0.00")
                 tdf['Link'] = tdf['Slug'].apply(lambda x: f"https://polymarket.com/event/{x}" if x else "")
                 tdf = tdf.drop(columns=['Slug'])
                 

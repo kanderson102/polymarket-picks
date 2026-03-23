@@ -34,6 +34,8 @@ class TradingDB:
             # Migration
             try:
                 cursor.execute("ALTER TABLE trades ADD COLUMN slug TEXT DEFAULT ''")
+                cursor.execute("ALTER TABLE trades ADD COLUMN outcome TEXT DEFAULT 'Yes'")
+                cursor.execute("ALTER TABLE trades ADD COLUMN bet_size REAL DEFAULT 0")
             except sqlite3.OperationalError:
                 pass
             
@@ -106,12 +108,12 @@ class TradingDB:
             """)
             conn.commit()
 
-    def add_trade(self, specialist: str, market: str, entry_price: float, slug: str = "") -> int:
+    def add_trade(self, specialist: str, market: str, entry_price: float, slug: str = "", outcome: str = "Yes", bet_size: float = 0.0) -> int:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "INSERT INTO trades (specialist, market, entry_price, slug) VALUES (?, ?, ?, ?)",
-                (specialist, market, entry_price, slug)
+                "INSERT INTO trades (specialist, market, entry_price, slug, outcome, bet_size) VALUES (?, ?, ?, ?, ?, ?)",
+                (specialist, market, entry_price, slug, outcome, bet_size)
             )
             conn.commit()
             return cursor.lastrowid
@@ -160,7 +162,7 @@ class TradingDB:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT market, entry_price, timestamp, result, slug 
+                SELECT market, entry_price, timestamp, result, slug, outcome, bet_size 
                 FROM trades 
                 WHERE specialist = ? 
                 ORDER BY timestamp DESC
@@ -192,7 +194,7 @@ class TradingDB:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT specialist, market, entry_price, timestamp, result, slug 
+                SELECT specialist, market, entry_price, timestamp, result, slug, outcome, bet_size 
                 FROM trades 
                 ORDER BY timestamp DESC 
                 LIMIT ?
@@ -267,7 +269,7 @@ class TradingDB:
     def get_total_pending_exposure(self) -> float:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT sum(entry_price) FROM trades WHERE result = 'PENDING'")
+            cursor.execute("SELECT sum(bet_size) FROM trades WHERE result = 'PENDING'")
             res = cursor.fetchone()[0]
             return float(res) if res else 0.0
 

@@ -89,7 +89,7 @@ class PolymarketBot:
                     if not spec.is_active or "MOCK" in spec.wallet_address:
                         continue 
                         
-                    # Query specialist positions using Polymarket Data API
+                    # Query specialist open positions using Polymarket Data API
                     resp = requests.get(f"{DATA_API_URL}/positions?user={spec.wallet_address}", timeout=10)
                     if resp.status_code == 200:
                         positions = resp.json()
@@ -100,7 +100,8 @@ class PolymarketBot:
                                 size = float(pos.get('size', 0))
                                 price = float(pos.get('avgPrice', 0))
                                 market = pos.get('title', 'Unknown Market')
-                                slug = pos.get('slug', '')
+                                slug = pos.get('eventSlug', pos.get('slug', ''))  # eventSlug for /event/ URL path
+                                outcome = pos.get('outcome', 'Yes')
                                 
                                 if size > 0:
                                     # Date constraint logic (Reject >7 days out, Reject past markets)
@@ -113,7 +114,7 @@ class PolymarketBot:
                                             
                                             if end_dt < now:
                                                 self.seen_positions.add(pos_id)
-                                                continue # Skip past matches (resolution delays)
+                                                continue # Skip past matches (resolution delays prevent ghost trades)
                                                 
                                             if (end_dt - now).days > 7:
                                                 self.seen_positions.add(pos_id)
@@ -124,16 +125,16 @@ class PolymarketBot:
                                     # Fallback tag: Use the specialist's primary domain to allow Phase 1 simulation checks to execute.
                                     # We mock leader price as price * 0.98 for the Phase 1 test
                                     assumed_tag = spec.target_tags[0] if spec.target_tags else "100381"
-                                    status, msg_reason = self.execute_trade_logic(spec, assumed_tag, price, price * 0.98, market)
+                                    status, msg_reason, bet_size = self.execute_trade_logic(spec, assumed_tag, price, price * 0.98, market)
                                     
                                     if status == "PASSED":
                                         self.seen_positions.add(pos_id)
                                         # Inject real trade object back to Database
-                                        self.db.add_trade(spec.name, market, price, slug)
+                                        self.db.add_trade(spec.name, market, price, slug, outcome, bet_size)
                                         
-                                        msg = f"✅ COPIED TRADE\nSpecialist: {spec.name}\nMarket: {market}\nEntry: ${price:.2f}"
+                                        msg = f"✅ COPIED TRADE\nSpecialist: {spec.name}\nMarket: {market}\nOutcome: {outcome}\nEntry: ${price:.2f}\nBet Size: ${bet_size:.2f}"
                                         self.send_telegram_alert(msg)
-                                        logging.info(f"✅ COPIED TRADE Specialist: {spec.name} Market: {market} Entry: ${price:.2f}")
+                                        logging.info(f"✅ COPIED TRADE Specialist: {spec.name} Market: {market} {outcome} at ${price:.2f} (Placed ${bet_size:.2f})")
                                         
                                     elif status == "PERMANENT_REJECT":
                                         self.seen_positions.add(pos_id)
@@ -168,7 +169,7 @@ class PolymarketBot:
         recent_trades = self.db.get_all_recent_trades(50)
         active_markets = [t[1] for t in recent_trades if t[4] == 'PENDING']
         if market_name in active_markets:
-            return "PERMANENT_REJECT", f"Already holding an active position in {market_name}"
+            return "PERMANENT_REJECT", f"Already holding an active position in {market_name}", 0.0
 
         # 1. Health Monitor Check
         win_rate = self.db.get_specialist_win_rate(specialist.name)
@@ -177,34 +178,34 @@ class PolymarketBot:
         min_win_rate = 40.0 if specialist.tier == 'WHALE' else 55.0
         
         if win_rate < min_win_rate:
-            return "PERMANENT_REJECT", f"Probation (Win Rate {win_rate}% < {min_win_rate}%)"
+            return "PERMANENT_REJECT", f"Probation (Win Rate {win_rate}% < {min_win_rate}%)", 0.0
             
         # 2. Correct Tag ID Mapping Check
         if str(market_tag) not in specialist.target_tags:
-            return "PERMANENT_REJECT", f"Market Tag {market_tag} OUTSIDE domain"
+            return "PERMANENT_REJECT", f"Market Tag {market_tag} OUTSIDE domain", 0.0
 
         # 3. Adaptive Value Caps
         max_entry = FinanceController.get_max_price_for_tag(market_tag)
         if current_price > max_entry:
-            return "TEMPORARY_REJECT", f"Current Price {current_price} exceeds Value Cap {max_entry}"
+            return "TEMPORARY_REJECT", f"Current Price {current_price} exceeds Value Cap {max_entry}", 0.0
 
         # 4. No Chase / Slippage Check
         if not FinanceController.is_slippage_acceptable(leader_price, current_price):
-            return "TEMPORARY_REJECT", f"Price slipped too far from Leader's price of {leader_price}"
+            return "TEMPORARY_REJECT", f"Price slipped too far from Leader's price of {leader_price}", 0.0
 
         # 5. Position Sizing
         # Mocking balance fetch for Phase 1 Validation dynamically via Local exposure
         current_wallet_balance = max(0.0, 50.0 - self.db.get_total_pending_exposure())
         
         if current_wallet_balance < 5.0:
-            return "TEMPORARY_REJECT", "Insufficient Buffer (Bankroll hit $5.00 fail-safe)"
+            return "TEMPORARY_REJECT", "Insufficient Buffer (Bankroll hit $5.00 fail-safe)", 0.0
             
         # Calculate bet size using baseline 50 for generic scaling math, but clamp to available balance so it halts naturally
         bet_size = FinanceController.calculate_bet_size(50.0, specialist.tier, win_rate)
         if bet_size > current_wallet_balance:
             bet_size = current_wallet_balance
 
-        return "PASSED", f"Validated for ${bet_size:.2f} bet"
+        return "PASSED", f"Validated for ${bet_size:.2f} bet", float(bet_size)
 
     def process_harvesting(self, current_balance: float):
         baseline, _ = self.db.get_performance()
