@@ -35,6 +35,12 @@ SPECIALISTS = []
 DATA_API_URL = "https://data-api.polymarket.com"
 CLOB_URL = "https://clob.polymarket.com"
 
+TAG_MAP = {
+    "100381": "NBA", "100382": "NCAAM", "100101": "Soccer", "100102": "UCL",
+    "100383": "MLB", "100384": "NHL", "100401": "Tennis",
+    "100601": "Tech", "100701": "Politics", "100801": "Pop Culture"
+}
+
 class PolymarketBot:
     def __init__(self):
         self.db = TradingDB()
@@ -73,7 +79,7 @@ class PolymarketBot:
             f"💰 Balance: ${balance:.2f}",
             f"📈 Exposure: ${exposure:.2f} across {pending} pending",
             "",
-            f"✅ {wins}W / ❌ {losses}L ({win_pct})",
+            f"✅ {wins} Wins / ❌ {losses} Losses ({win_pct})",
             "",
             "Bot is running."
         ]
@@ -205,7 +211,8 @@ class PolymarketBot:
             
         # 2. Correct Tag ID Mapping Check
         if str(market_tag) not in specialist.target_tags:
-            return "PERMANENT_REJECT", f"Market Tag {market_tag} OUTSIDE domain", 0.0
+            tag_name = TAG_MAP.get(str(market_tag), market_tag)
+            return "PERMANENT_REJECT", f"{tag_name} outside domain", 0.0
 
         # 3. Adaptive Value Caps
         max_entry = FinanceController.get_max_price_for_tag(market_tag)
