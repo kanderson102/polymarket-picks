@@ -31,13 +31,16 @@ class TradingDB:
                 )
             """)
             
-            # Migration
-            try:
-                cursor.execute("ALTER TABLE trades ADD COLUMN slug TEXT DEFAULT ''")
-                cursor.execute("ALTER TABLE trades ADD COLUMN outcome TEXT DEFAULT 'Yes'")
-                cursor.execute("ALTER TABLE trades ADD COLUMN bet_size REAL DEFAULT 0")
-            except sqlite3.OperationalError:
-                pass
+            # Migration — each column independently so existing ones don't block new ones
+            for migration in [
+                "ALTER TABLE trades ADD COLUMN slug TEXT DEFAULT ''",
+                "ALTER TABLE trades ADD COLUMN outcome TEXT DEFAULT 'Yes'",
+                "ALTER TABLE trades ADD COLUMN bet_size REAL DEFAULT 0",
+            ]:
+                try:
+                    cursor.execute(migration)
+                except sqlite3.OperationalError:
+                    pass
             
             # Performance Table
             cursor.execute("""
