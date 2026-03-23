@@ -64,8 +64,20 @@ class PolymarketBot:
         wins = sum(1 for t in recent if t[4] == 'WON')
         losses = sum(1 for t in recent if t[4] == 'LOST')
         pending = sum(1 for t in recent if t[4] == 'PENDING')
+        total_resolved = wins + losses
+        win_pct = f"{(wins/total_resolved*100):.0f}%" if total_resolved > 0 else "N/A"
         
-        return f"📊 Hourly Bot Summary:\n\nAvailable USDC: ${balance:.2f}\nTotal Pending Exposure: ${exposure:.2f} across {pending} trades\n\nWins to Date: {wins}\nLosses to Date: {losses}\n\nThe bot will continue autonomously managing your portfolio balance safely."
+        lines = [
+            "📊 Hourly Summary",
+            "",
+            f"💰 Balance: ${balance:.2f}",
+            f"📈 Exposure: ${exposure:.2f} across {pending} pending",
+            "",
+            f"✅ {wins}W / ❌ {losses}L ({win_pct})",
+            "",
+            "Bot is running."
+        ]
+        return "\n".join(lines)
 
     def monitor_loop(self):
         logging.info("Starting real-time Gamma API polling loop...")
@@ -132,23 +144,34 @@ class PolymarketBot:
                                         # Inject real trade object back to Database
                                         self.db.add_trade(spec.name, market, price, slug, outcome, bet_size)
                                         
-                                        msg = f"✅ COPIED TRADE\nSpecialist: {spec.name}\nMarket: {market}\nOutcome: {outcome}\nEntry: ${price:.2f}\nBet Size: ${bet_size:.2f}"
+                                        remaining = max(0.0, 50.0 - self.db.get_total_pending_exposure())
+                                        link = f"https://polymarket.com/event/{slug}" if slug else ""
+                                        msg = "\n".join([
+                                            "✅ COPIED TRADE",
+                                            "",
+                                            f"📋 {market}",
+                                            f"👤 {spec.name} ({spec.tier})",
+                                            f"🎯 {outcome} @ ${price:.2f}",
+                                            f"💵 Bet: ${bet_size:.2f}",
+                                            f"💰 Balance: ${remaining:.2f}",
+                                            "",
+                                            link
+                                        ])
                                         self.send_telegram_alert(msg)
-                                        logging.info(f"✅ COPIED TRADE Specialist: {spec.name} Market: {market} {outcome} at ${price:.2f} (Placed ${bet_size:.2f})")
+                                        logging.info(f"✅ COPIED TRADE {spec.name} | {market} | {outcome} @ ${price:.2f} | Bet ${bet_size:.2f} | Bal ${remaining:.2f}")
                                         
                                     elif status == "PERMANENT_REJECT":
                                         self.seen_positions.add(pos_id)
-                                        msg = f"⛔ REJECTED (Forever) {spec.name} - {msg_reason} - Market: {market}"
+                                        msg = f"⛔ SKIP {spec.name}\n{market}\n{msg_reason}"
                                         self.send_telegram_alert(msg)
-                                        logging.warning(msg)
+                                        logging.warning(f"⛔ REJECT {spec.name} | {market} | {msg_reason}")
                                         
                                     elif status == "TEMPORARY_REJECT":
                                         # Do NOT add to seen_positions. It will be retried next loop.
                                         # Avoid log/telegram spam:
                                         if pos_id not in self.watched_positions:
                                             self.watched_positions.add(pos_id)
-                                            msg = f"⏳ WAITING (Price too high) {spec.name}. Watching for dip. Reason: {msg_reason}. Market: {market}"
-                                            logging.info(msg)
+                                            logging.info(f"⏳ WATCH {spec.name} | {market} | {msg_reason}")
                     else:
                         logging.warning(f"Failed to fetch positions for {spec.name}: API returned HTTP {resp.status_code}")
             except Exception as e:
