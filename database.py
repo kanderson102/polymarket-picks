@@ -36,6 +36,7 @@ class TradingDB:
                 "ALTER TABLE trades ADD COLUMN slug TEXT DEFAULT ''",
                 "ALTER TABLE trades ADD COLUMN outcome TEXT DEFAULT 'Yes'",
                 "ALTER TABLE trades ADD COLUMN bet_size REAL DEFAULT 0",
+                "ALTER TABLE trades ADD COLUMN end_date TEXT DEFAULT ''",
             ]:
                 try:
                     cursor.execute(migration)
@@ -79,13 +80,14 @@ class TradingDB:
             cursor.execute("SELECT COUNT(*) FROM specialists")
             if cursor.fetchone()[0] == 0:
                 defaults = [
-                    ("S-Works", "0xee00ba338c59557141789b127927a55f5cc5cea1", "100383,100384,100401", "SHARP"),
-                    ("1j59y6nk", "0x134240c2a99fa2a1cd9db6fc2caa65043259c997", "100101,100102,100381", "SHARP"),
+                    ("S-Works", "0xee00ba338c59557141789b127927a55f5cc5cea1", "100101,100102,100381", "SHARP"),
                     ("reachingthesky", "0xefbc5fec8d7b0acdc8911bdd9a98d6964308f9a2", "100101,100102", "SHARP"),
-                    ("HorizonSplendidView", "0x02227b8f5a9636e895607edd3185ed6ee5598ff7", "100383", "SHARP"),
-                    ("CemeterySun", "0x37c1874a60d348903594a96703e0507c518fc53a", "100384,100401", "SHARP"),
-                    ("aenews", "0x44c1dfe43260c94ed4f1d00de2e1f80fb113ebc1", "100701", "WHALE"),
-                    ("LlamaEnjoyer", "0x9b979a065641e8cfde3022a30ed2d9415cf55e12", "100601", "WHALE")
+                    ("HorizonSplendidView", "0x02227b8f5a9636e895607edd3185ed6ee5598ff7", "100101,100102", "SHARP"),
+                    ("CemeterySun", "0x37c1874a60d348903594a96703e0507c518fc53a", "100381,100101,100384", "SHARP"),
+                    ("LlamaEnjoyer", "0x9b979a065641e8cfde3022a30ed2d9415cf55e12", "100801", "WHALE"),
+                    ("beachboy4", "0xc2e7800b5af46e6093872b177b7a5e7f0563be51", "100381,100101,100102", "SHARP"),
+                    ("CERTuo", "0xf195721ad850377c96cd634457c70cd9e8308057", "100384", "SHARP"),
+                    ("majorexploiter", "0x019782cab5d844f02bafb71f512758be78579f3c", "100101,100102", "SHARP")
                 ]
                 cursor.executemany("INSERT INTO specialists (name, wallet_address, target_tags, tier) VALUES (?, ?, ?, ?)", defaults)
                 
@@ -111,12 +113,12 @@ class TradingDB:
             """)
             conn.commit()
 
-    def add_trade(self, specialist: str, market: str, entry_price: float, slug: str = "", outcome: str = "Yes", bet_size: float = 0.0) -> int:
+    def add_trade(self, specialist: str, market: str, entry_price: float, slug: str = "", outcome: str = "Yes", bet_size: float = 0.0, end_date: str = "") -> int:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "INSERT INTO trades (specialist, market, entry_price, slug, outcome, bet_size) VALUES (?, ?, ?, ?, ?, ?)",
-                (specialist, market, entry_price, slug, outcome, bet_size)
+                "INSERT INTO trades (specialist, market, entry_price, slug, outcome, bet_size, end_date) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (specialist, market, entry_price, slug, outcome, bet_size, end_date)
             )
             conn.commit()
             return cursor.lastrowid
@@ -165,7 +167,7 @@ class TradingDB:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT market, entry_price, timestamp, result, slug, outcome, bet_size 
+                SELECT market, entry_price, timestamp, result, slug, outcome, bet_size, end_date 
                 FROM trades 
                 WHERE specialist = ? 
                 ORDER BY timestamp DESC
@@ -197,7 +199,7 @@ class TradingDB:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT specialist, market, entry_price, timestamp, result, slug, outcome, bet_size 
+                SELECT specialist, market, entry_price, timestamp, result, slug, outcome, bet_size, end_date 
                 FROM trades 
                 ORDER BY timestamp DESC 
                 LIMIT ?
@@ -292,4 +294,24 @@ class TradingDB:
                 seconds_ago = row[0]
                 return seconds_ago <= 120 # Alive if heartbeat was within 2 mins
             return False
+
+    def get_pending_trades_for_resolution(self) -> list[dict]:
+        """Fetch all PENDING trades with their slugs and outcomes for resolution checking."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id, specialist, market, entry_price, slug, outcome, bet_size
+                FROM trades 
+                WHERE result = 'PENDING' AND slug != ''
+                ORDER BY timestamp ASC
+            """)
+            rows = cursor.fetchall()
+            return [
+                {
+                    "id": r[0], "specialist": r[1], "market": r[2],
+                    "entry_price": r[3], "slug": r[4], "outcome": r[5],
+                    "bet_size": r[6]
+                }
+                for r in rows
+            ]
 

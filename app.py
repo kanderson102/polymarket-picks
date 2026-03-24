@@ -97,19 +97,29 @@ def render_dashboard(db):
     col_active.metric("Active Pending Positions", active_positions)
     
     if recent_trades:
-        trades_df = pd.DataFrame(recent_trades[:20], columns=['Specialist', 'Market', 'Entry Price', 'Timestamp', 'Status', 'Slug', 'Outcome', 'Bet Size'])
+        trades_df = pd.DataFrame(recent_trades[:20], columns=['Specialist', 'Market', 'Entry Price', 'Timestamp', 'Status', 'Slug', 'Outcome', 'Bet Size', 'End Date'])
         trades_df['Entry Price'] = trades_df['Entry Price'].apply(lambda x: f"${x:.2f}")
         trades_df['Bet Size'] = trades_df['Bet Size'].apply(lambda x: f"${x:.2f}" if x and x > 0 else "—")
-        trades_df['Link'] = trades_df['Slug'].apply(lambda x: f"https://polymarket.com/event/{x}" if x else "")
-        # Reorder: Specialist, Market, Side, Entry Price, Bet Size, Status, Timestamp, Link
-        trades_df = trades_df[['Specialist', 'Market', 'Outcome', 'Entry Price', 'Bet Size', 'Status', 'Timestamp', 'Link']]
+        # Make Specialist name a clickable link to their Polymarket profile
+        trades_df['Specialist'] = trades_df['Specialist'].apply(lambda x: f"https://polymarket.com/@{x}")
+        # Make Market a clickable link to the event
+        trades_df['Market Link'] = trades_df.apply(
+            lambda r: f"https://polymarket.com/event/{r['Slug']}" if r['Slug'] else "", axis=1
+        )
+        # Format end date as readable
+        trades_df['Est. Close'] = trades_df['End Date'].apply(
+            lambda x: x.split('T')[0] if x and 'T' in str(x) else (x if x else "—")
+        )
+        # Select and reorder columns
+        trades_df = trades_df[['Specialist', 'Market', 'Market Link', 'Outcome', 'Entry Price', 'Bet Size', 'Status', 'Timestamp', 'Est. Close']]
         
         st.dataframe(
             trades_df, 
             use_container_width=True, 
             hide_index=True,
             column_config={
-                "Link": st.column_config.LinkColumn("Polymarket", display_text="Open ↗")
+                "Specialist": st.column_config.LinkColumn("Specialist", display_text=r"https://polymarket\.com/@(.+)"),
+                "Market Link": st.column_config.LinkColumn("Market", display_text="Open ↗"),
             }
         )
     else:
@@ -133,8 +143,8 @@ def render_dashboard(db):
             new_tags = ",".join([REVERSE_TAG_MAP[c] for c in selected_categories])
             
             # Clarified Tier explanations
-            st.markdown("* **SHARP**: Volume traders (hundreds of picks). They grind 55-65% win rates consistently. (Allocated 1% per bet)*")
-            st.markdown("* **WHALE**: Swing for the fences (long-shots) or 'Buy-the-Clear-Win' (huge capital yield farming). Heavy variance. (Allocated 2% per bet)*")
+            st.markdown("* **SHARP**: Volume traders (hundreds of picks). They grind 55-65% win rates consistently. (Allocated 5% per bet)*")
+            st.markdown("* **WHALE**: Swing for the fences (long-shots) or 'Buy-the-Clear-Win' (huge capital yield farming). Heavy variance. (Allocated 3% per bet)*")
             new_tier = st.selectbox("Strategy Tier", ["SHARP", "WHALE"])
             
             # Vetting Mechanism
@@ -210,12 +220,15 @@ def render_dashboard(db):
         with st.expander(f"📊 View Bot's Trade History for {spec['name']}"):
             spec_trades = db.get_specialist_all_trades(spec['name'])
             if spec_trades:
-                tdf = pd.DataFrame(spec_trades, columns=['Market', 'Entry Price', 'Timestamp', 'Result', 'Slug', 'Outcome', 'Bet Size'])
+                tdf = pd.DataFrame(spec_trades, columns=['Market', 'Entry Price', 'Timestamp', 'Result', 'Slug', 'Outcome', 'Bet Size', 'End Date'])
                 tdf['Entry Price'] = tdf['Entry Price'].apply(lambda x: f"${x:.2f}")
                 tdf['Bet Size'] = tdf['Bet Size'].apply(lambda x: f"${x:.2f}" if x and x > 0 else "—")
-                tdf['Link'] = tdf['Slug'].apply(lambda x: f"https://polymarket.com/event/{x}" if x else "")
+                tdf['Market Link'] = tdf['Slug'].apply(lambda x: f"https://polymarket.com/event/{x}" if x else "")
+                tdf['Est. Close'] = tdf['End Date'].apply(
+                    lambda x: x.split('T')[0] if x and 'T' in str(x) else (x if x else "—")
+                )
                 # Reorder columns
-                tdf = tdf[['Market', 'Outcome', 'Entry Price', 'Bet Size', 'Result', 'Timestamp', 'Link']]
+                tdf = tdf[['Market', 'Market Link', 'Outcome', 'Entry Price', 'Bet Size', 'Result', 'Timestamp', 'Est. Close']]
                 
                 wins = sum(1 for t in spec_trades if t[3] == "WON")
                 losses = sum(1 for t in spec_trades if t[3] == "LOST")
@@ -227,7 +240,7 @@ def render_dashboard(db):
                     use_container_width=True, 
                     hide_index=True,
                     column_config={
-                        "Link": st.column_config.LinkColumn("Polymarket", display_text="Open ↗")
+                        "Market Link": st.column_config.LinkColumn("Link", display_text="Open ↗")
                     }
                 )
             else:

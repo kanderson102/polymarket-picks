@@ -21,12 +21,15 @@ class FinanceController:
         """
         Dynamic Position Sizing.
         Automatically scales portfolio capital towards sharp traders over time.
-        Whales get a lower base allocation (2%) to balance out their higher variance, 
-        but large enough to clear gas fees. Sharp traders get a standard allocation (1%).
+        Whales get a lower base allocation (3%) to balance out their higher variance, 
+        but large enough to clear gas fees. Sharp traders get a standard allocation (5%).
+        
+        Phase 1-2 ($50 bankroll): 5% SHARP / 3% WHALE
+        Phase 3 ($1000+ bankroll): Scale down to 1-2% as bankroll grows.
         """
         # Base capital percentage
-        # Testing conservative allocations: Sharp traders start at 1%, Whales at 2%
-        base_percent = 0.01 if tier == 'SHARP' else 0.02
+        # Phase 1-2: SHARP 5%, WHALE 3% (meaningful size on small bankroll)
+        base_percent = 0.05 if tier == 'SHARP' else 0.03
         
         # Scale the bet size dynamically by their historical win rate
         # A 75% win rate grinder will place 1.5x larger bets automatically
@@ -98,4 +101,26 @@ class FinanceController:
         """
         max_acceptable_price = specialist_price * 1.025
         return current_market_price <= max_acceptable_price
+
+    @staticmethod
+    def check_liquidity(book_data: dict, bet_size: float) -> tuple[bool, float]:
+        """
+        Order Book Depth Check.
+        Verifies there is sufficient liquidity at the best ask to fill the bet.
+        Returns (is_sufficient, available_liquidity).
+        """
+        asks = book_data.get('asks', [])
+        if not asks:
+            return False, 0.0
+        
+        # Sum available liquidity across top 3 price levels
+        total_liquidity = 0.0
+        for ask in asks[:3]:
+            price = float(ask.get('price', 0))
+            size = float(ask.get('size', 0))
+            total_liquidity += price * size
+        
+        # Require at least 2x bet size in available liquidity
+        is_sufficient = total_liquidity >= (bet_size * 2)
+        return is_sufficient, total_liquidity
 

@@ -2,8 +2,10 @@ import time
 import requests
 import os
 import logging
+import threading
 from dotenv import load_dotenv
 from finance import FinanceController
+from ws_listener import PolymarketWSListener
 
 load_dotenv()
 from database import TradingDB
@@ -34,6 +36,9 @@ SPECIALISTS = []
 
 DATA_API_URL = "https://data-api.polymarket.com"
 CLOB_URL = "https://clob.polymarket.com"
+GAMMA_API_URL = "https://gamma-api.polymarket.com"
+
+POLL_INTERVAL = 30  # HTTP polling fallback interval (seconds)
 
 TAG_MAP = {
     "100381": "NBA", "100382": "NCAAM", "100101": "Soccer", "100102": "UCL",
@@ -41,11 +46,43 @@ TAG_MAP = {
     "100601": "Tech", "100701": "Politics", "100801": "Pop Culture"
 }
 
+# Cache for market tag lookups (event_slug -> list of tag IDs)
+_tag_cache = {}
+
+
+def lookup_market_tags(event_slug: str) -> list[str]:
+    """Query the Gamma API to get actual category tags for a market."""
+    if event_slug in _tag_cache:
+        return _tag_cache[event_slug]
+    
+    try:
+        resp = requests.get(f"{GAMMA_API_URL}/events?slug={event_slug}", timeout=5)
+        if resp.status_code == 200:
+            events = resp.json()
+            if events and len(events) > 0:
+                event = events[0]
+                tags = []
+                # Gamma API returns tags as a list of objects with "id" field
+                for tag in event.get('tags', []):
+                    tag_id = str(tag.get('id', '')) if isinstance(tag, dict) else str(tag)
+                    if tag_id:
+                        tags.append(tag_id)
+                _tag_cache[event_slug] = tags
+                return tags
+    except Exception as e:
+        logging.debug(f"Tag lookup failed for {event_slug}: {e}")
+    
+    # Return empty list on failure (caller uses fallback)
+    _tag_cache[event_slug] = []
+    return []
+
+
 class PolymarketBot:
     def __init__(self):
         self.db = TradingDB()
         self.seen_positions = set()
         self.watched_positions = set()
+        self.ws_listener = None
         
         # Load Baseline
         baseline, _ = self.db.get_performance()
@@ -53,6 +90,9 @@ class PolymarketBot:
         
         # Pre-seed seen_positions so restarts don't re-trigger existing trades
         self._preseed_seen_positions()
+        
+        # Run initial resolution check on startup to backfill existing trades
+        self.resolve_pending_trades()
     
     def _preseed_seen_positions(self):
         """On startup, scan specialist positions and mark any that already have
@@ -103,24 +143,134 @@ class PolymarketBot:
         total_resolved = wins + losses
         win_pct = f"{(wins/total_resolved*100):.0f}%" if total_resolved > 0 else "N/A"
         
+        # Calculate P&L from resolved trades
+        total_pnl = 0.0
+        for t in recent:
+            if t[4] == 'WON':
+                bet_size = t[7] if t[7] and t[7] > 0 else t[2]
+                entry_price = t[2]
+                # Won: payout is bet_size / entry_price (shares * $1), profit = payout - bet_size
+                if entry_price > 0:
+                    total_pnl += (bet_size / entry_price) - bet_size
+            elif t[4] == 'LOST':
+                bet_size = t[7] if t[7] and t[7] > 0 else t[2]
+                total_pnl -= bet_size
+        
+        ws_status = "🟢 WS" if (self.ws_listener and self.ws_listener.is_connected) else "🔴 WS"
+        
         lines = [
             "📊 Hourly Summary",
             "",
             f"💰 Balance: ${balance:.2f}",
             f"📈 Exposure: ${exposure:.2f} across {pending} pending",
+            f"💵 Realized P&L: ${total_pnl:+.2f}",
             "",
             f"✅ {wins} Wins / ❌ {losses} Losses ({win_pct})",
             "",
-            "Bot is running."
+            f"{ws_status} | Bot is running."
         ]
         return "\n".join(lines)
 
+    def resolve_pending_trades(self):
+        """Check all PENDING trades and auto-resolve WON/LOST based on market status."""
+        pending = self.db.get_pending_trades_for_resolution()
+        if not pending:
+            return
+        
+        resolved_count = 0
+        for trade in pending:
+            try:
+                slug = trade['slug']
+                our_outcome = trade['outcome']  # What we bet on (e.g., "Yes", "Spurs")
+                
+                # Query the Gamma API for market resolution status
+                resp = requests.get(f"{GAMMA_API_URL}/events?slug={slug}", timeout=5)
+                if resp.status_code != 200:
+                    continue
+                
+                events = resp.json()
+                if not events:
+                    continue
+                
+                event = events[0]
+                markets = event.get('markets', [])
+                
+                for market in markets:
+                    market_question = market.get('question', '')
+                    
+                    # Match our trade to the right market within the event
+                    if trade['market'] not in market_question and market_question not in trade['market']:
+                        continue
+                    
+                    resolved = market.get('resolved', False)
+                    if not resolved:
+                        continue
+                    
+                    # Determine if we won or lost
+                    winning_outcome = market.get('outcome', '')  # "Yes" or "No"
+                    
+                    if winning_outcome:
+                        result = 'WON' if our_outcome == winning_outcome else 'LOST'
+                        self.db.update_trade_result(trade['id'], result)
+                        resolved_count += 1
+                        
+                        bet = trade['bet_size'] if trade['bet_size'] > 0 else trade['entry_price']
+                        emoji = "🏆" if result == "WON" else "💀"
+                        pnl = (bet / trade['entry_price'] - bet) if result == 'WON' and trade['entry_price'] > 0 else -bet
+                        
+                        msg = "\n".join([
+                            f"{emoji} TRADE RESOLVED: {result}",
+                            "",
+                            f"📋 {trade['market']}",
+                            f"👤 {trade['specialist']}",
+                            f"🎯 {our_outcome} @ ${trade['entry_price']:.2f}",
+                            f"💵 Bet: ${bet:.2f}",
+                            f"💰 P&L: ${pnl:+.2f}",
+                        ])
+                        self.send_telegram_alert(msg)
+                        logging.info(f"{emoji} RESOLVED {trade['specialist']} | {trade['market']} | {result} | P&L ${pnl:+.2f}")
+                        break
+                        
+            except Exception as e:
+                logging.debug(f"Resolution check failed for trade {trade['id']}: {e}")
+        
+        if resolved_count > 0:
+            logging.info(f"📊 Auto-resolved {resolved_count} trades this cycle")
+
+    def check_order_book_depth(self, asset_id: str, bet_size: float) -> tuple[bool, float]:
+        """Check if there's enough liquidity in the order book for our bet size."""
+        try:
+            resp = requests.get(f"{CLOB_URL}/book?token_id={asset_id}", timeout=3)
+            if resp.status_code == 200:
+                book_data = resp.json()
+                return FinanceController.check_liquidity(book_data, bet_size)
+        except Exception as e:
+            logging.debug(f"Order book check failed for {asset_id}: {e}")
+        
+        # If check fails, allow the trade (don't block on optional check)
+        return True, 0.0
+
+    def _start_websocket(self):
+        """Start the WebSocket listener for real-time trade detection."""
+        def on_ws_status(message):
+            self.send_telegram_alert(f"🔌 {message}")
+        
+        self.ws_listener = PolymarketWSListener(
+            on_trade_callback=None,  # We use polling + WS for detection, not pure WS
+            on_status_callback=on_ws_status
+        )
+        self.ws_listener.start()
+        logging.info("🔌 WebSocket listener started as background monitor")
+
     def monitor_loop(self):
-        logging.info("Starting real-time Gamma API polling loop...")
+        logging.info("Starting real-time polling loop with WebSocket fallback...")
         self.send_telegram_alert("🚀 Polymarket Copy-Bot Started and Monitoring!")
         EST = timezone(timedelta(hours=-5))
         SUMMARY_HOURS = {8, 12, 16, 20}  # 8am, 12pm, 4pm, 8pm EST
         sent_summary_for = set()  # Track which hours we already sent
+        
+        # Start WebSocket listener in background
+        self._start_websocket()
         
         while True:
             try:
@@ -135,6 +285,9 @@ class PolymarketBot:
                     sent_summary_for.add(hour_key)
                     # Keep set small: clear entries older than today
                     sent_summary_for = {k for k in sent_summary_for if k[0] >= now_est.date()}
+                
+                # Auto-resolve any completed trades
+                self.resolve_pending_trades()
                 
                 db_specs = self.db.get_all_specialists()
                 dynamic_specialists = [Specialist(s["name"], s["wallet"], s["tags"], s.get("tier", "SHARP"), s.get("is_active", True)) for s in db_specs]
@@ -175,16 +328,41 @@ class PolymarketBot:
                                                 continue # Skip long-term capital lockup
                                         except ValueError:
                                             pass
+                                    
+                                    # Real tag matching: look up actual market tags from Gamma API
+                                    market_tags = lookup_market_tags(slug) if slug else []
+                                    
+                                    # Find the best matching tag between market and specialist
+                                    matched_tag = None
+                                    for tag in market_tags:
+                                        if tag in spec.target_tags:
+                                            matched_tag = tag
+                                            break
+                                    
+                                    # Fallback: if no tags found from API, use specialist's primary domain
+                                    if matched_tag is None and not market_tags:
+                                        matched_tag = spec.target_tags[0] if spec.target_tags else "100381"
+                                        logging.debug(f"Tag API unavailable for {slug}, using fallback tag {matched_tag}")
+                                    elif matched_tag is None:
+                                        # Market has tags but none match specialist's domain — skip
+                                        self.seen_positions.add(pos_id)
+                                        tag_names = [TAG_MAP.get(t, t) for t in market_tags[:3]]
+                                        logging.info(f"⛔ TAG MISMATCH {spec.name} | {market} | Market tags: {tag_names}")
+                                        continue
                                             
-                                    # Fallback tag: Use the specialist's primary domain to allow Phase 1 simulation checks to execute.
                                     # We mock leader price as price * 0.98 for the Phase 1 test
-                                    assumed_tag = spec.target_tags[0] if spec.target_tags else "100381"
-                                    status, msg_reason, bet_size = self.execute_trade_logic(spec, assumed_tag, price, price * 0.98, market)
+                                    status, msg_reason, bet_size = self.execute_trade_logic(spec, matched_tag, price, price * 0.98, market)
                                     
                                     if status == "PASSED":
+                                        # Order book depth check before final execution
+                                        has_liquidity, avail_liq = self.check_order_book_depth(pos_id, bet_size)
+                                        if not has_liquidity and avail_liq > 0:
+                                            logging.warning(f"⚠️ Low liquidity for {market}: ${avail_liq:.2f} available, need ${bet_size*2:.2f}")
+                                            # Still proceed but note it — at Phase 1 sizes this is rarely an issue
+                                        
                                         self.seen_positions.add(pos_id)
                                         # Inject real trade object back to Database
-                                        self.db.add_trade(spec.name, market, price, slug, outcome, bet_size)
+                                        self.db.add_trade(spec.name, market, price, slug, outcome, bet_size, endDate_str)
                                         
                                         remaining = max(0.0, 50.0 - self.db.get_total_pending_exposure())
                                         link = f"https://polymarket.com/event/{slug}" if slug else ""
@@ -222,12 +400,12 @@ class PolymarketBot:
                 logging.error(f"Error in monitor loop: {e}")
                 self.send_telegram_alert(f"🚨 CRITICAL ERROR in monitor_loop: {e}")
                 
-            time.sleep(60) # Poll every 60s
+            time.sleep(POLL_INTERVAL)
 
     def execute_trade_logic(self, specialist: Specialist, market_tag: str, current_price: float, leader_price: float, market_name: str):
         """
         Runs the full check based on the PRD before sending the CLOB API order.
-        Returns a tuple: (Status, Reason_String)
+        Returns a tuple: (Status, Reason_String, Bet_Size)
         Status can be "PASSED", "PERMANENT_REJECT", or "TEMPORARY_REJECT".
         """
         # 0. Collision Check / Opposing Bets
