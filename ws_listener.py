@@ -22,6 +22,9 @@ WS_URL = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
 PING_INTERVAL = 10  # Polymarket requires a PING every 10s
 MAX_RECONNECT_ATTEMPTS = 5
 BASE_RECONNECT_DELAY = 5  # seconds
+MIN_STABLE_DURATION = 30  # seconds — connection must be alive this long before we reset reconnect count
+RAPID_LOOP_THRESHOLD = 50  # if we loop this many times without a stable connection, force a long backoff
+LONG_BACKOFF_INTERVAL = 300  # 5 minutes
 
 
 class PolymarketWSListener:
@@ -45,9 +48,30 @@ class PolymarketWSListener:
         self.is_running = False
         self.monitored_assets = set()
         self._reconnect_count = 0
+        self._total_loop_count = 0  # Track total rapid loops for circuit breaker
         self._thread = None
         self._ping_thread = None
         self._lock = threading.Lock()
+        self._connect_time = None  # When the connection was established
+        self._last_log_msg = None  # For log deduplication
+        self._last_log_repeat_count = 0
+    
+    def _dedupe_log(self, level, msg):
+        """Log with deduplication — suppress identical consecutive messages."""
+        if msg == self._last_log_msg:
+            self._last_log_repeat_count += 1
+            # Only log every 10th repeat, or on specific milestones
+            if self._last_log_repeat_count in (10, 50, 100) or self._last_log_repeat_count % 100 == 0:
+                logger.log(level, f"{msg} (repeated {self._last_log_repeat_count}x)")
+            return
+        
+        # New unique message — flush the repeat counter if needed
+        if self._last_log_repeat_count > 1:
+            logger.log(level, f"  ↳ (previous message repeated {self._last_log_repeat_count}x total)")
+        
+        self._last_log_msg = msg
+        self._last_log_repeat_count = 1
+        logger.log(level, msg)
     
     def start(self, asset_ids: list[str] = None):
         """Start the WebSocket listener in a background thread."""
@@ -57,6 +81,7 @@ class PolymarketWSListener:
         
         self.is_running = True
         self._reconnect_count = 0
+        self._total_loop_count = 0
         if asset_ids:
             self.monitored_assets = set(asset_ids)
         
@@ -90,24 +115,40 @@ class PolymarketWSListener:
             try:
                 self._connect()
             except Exception as e:
-                logger.error(f"WebSocket connection error: {e}")
+                self._dedupe_log(logging.ERROR, f"WebSocket connection error: {e}")
             
             if not self.is_running:
                 break
             
-            # Exponential backoff on reconnect
+            self._total_loop_count += 1
+            
+            # Circuit breaker: if we've looped too many times without a stable connection,
+            # force a long backoff instead of spamming reconnects
+            if self._total_loop_count >= RAPID_LOOP_THRESHOLD:
+                self._dedupe_log(logging.WARNING,
+                    f"🚨 WebSocket circuit breaker: {self._total_loop_count} unstable loops. "
+                    f"Backing off for {LONG_BACKOFF_INTERVAL}s.")
+                if self.on_status:
+                    self.on_status(f"🚨 WebSocket circuit breaker after {self._total_loop_count} failed loops. Backing off 5 min.")
+                time.sleep(LONG_BACKOFF_INTERVAL)
+                self._total_loop_count = 0
+                self._reconnect_count = 0
+                continue
+            
+            # Standard exponential backoff
             self._reconnect_count += 1
             if self._reconnect_count > MAX_RECONNECT_ATTEMPTS:
                 msg = f"🚨 WebSocket failed after {MAX_RECONNECT_ATTEMPTS} attempts. Falling back to HTTP polling."
-                logger.error(msg)
+                self._dedupe_log(logging.ERROR, msg)
                 if self.on_status:
                     self.on_status(msg)
                 # Wait longer before trying again (5 minutes)
-                time.sleep(300)
+                time.sleep(LONG_BACKOFF_INTERVAL)
                 self._reconnect_count = 0
             else:
                 delay = BASE_RECONNECT_DELAY * (2 ** (self._reconnect_count - 1))
-                logger.info(f"🔄 WebSocket reconnecting in {delay}s (attempt {self._reconnect_count}/{MAX_RECONNECT_ATTEMPTS})")
+                self._dedupe_log(logging.INFO,
+                    f"🔄 WebSocket reconnecting in {delay}s (attempt {self._reconnect_count}/{MAX_RECONNECT_ATTEMPTS})")
                 time.sleep(delay)
     
     def _connect(self):
@@ -124,12 +165,12 @@ class PolymarketWSListener:
     def _on_open(self, ws):
         """Called when WebSocket connection is established."""
         self.is_connected = True
-        self._reconnect_count = 0
+        self._connect_time = time.monotonic()
         
-        msg = "✅ WebSocket connected to Polymarket CLOB"
-        logger.info(msg)
-        if self.on_status:
-            self.on_status(msg)
+        # DON'T reset reconnect count here — only reset after connection is stable
+        # (see _check_stable_reset called from ping loop)
+        
+        self._dedupe_log(logging.INFO, "✅ WebSocket connected to Polymarket CLOB")
         
         # Subscribe to monitored assets
         if self.monitored_assets:
@@ -161,13 +202,29 @@ class PolymarketWSListener:
     
     def _on_error(self, ws, error):
         """Called when a WebSocket error occurs."""
-        logger.error(f"WebSocket error: {error}")
+        self._dedupe_log(logging.ERROR, f"WebSocket error: {error}")
         self.is_connected = False
     
     def _on_close(self, ws, close_status_code, close_msg):
         """Called when WebSocket connection is closed."""
+        was_stable = self._was_connection_stable()
         self.is_connected = False
-        logger.info(f"WebSocket closed (code={close_status_code})")
+        
+        if was_stable:
+            # Connection was stable before dropping — this is a normal disconnect
+            self._dedupe_log(logging.INFO, f"WebSocket closed after stable connection (code={close_status_code})")
+            self._reconnect_count = 0  # Reset since last connection was good
+            self._total_loop_count = 0
+        else:
+            # Connection dropped almost immediately — don't reset counters
+            self._dedupe_log(logging.WARNING,
+                f"WebSocket dropped quickly (code={close_status_code}), not resetting backoff")
+    
+    def _was_connection_stable(self) -> bool:
+        """Check if the current connection has been alive longer than MIN_STABLE_DURATION."""
+        if self._connect_time is None:
+            return False
+        return (time.monotonic() - self._connect_time) >= MIN_STABLE_DURATION
     
     def _subscribe(self, asset_ids: list[str]):
         """Subscribe to market data for specific assets."""
@@ -194,6 +251,13 @@ class PolymarketWSListener:
                         self.ws.send("PING")
                 except Exception:
                     break
+                
+                # Check if connection has been stable long enough to reset counters
+                if self._was_connection_stable() and self._reconnect_count > 0:
+                    logger.info(f"✅ WebSocket stable for {MIN_STABLE_DURATION}s — resetting reconnect counters")
+                    self._reconnect_count = 0
+                    self._total_loop_count = 0
+                
                 time.sleep(PING_INTERVAL)
         
         self._ping_thread = threading.Thread(target=ping_loop, daemon=True)

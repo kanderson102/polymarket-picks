@@ -124,3 +124,40 @@ class FinanceController:
         is_sufficient = total_liquidity >= (bet_size * 2)
         return is_sufficient, total_liquidity
 
+    @staticmethod
+    def estimate_taker_fee(price: float, tag_id: str) -> float:
+        """
+        Estimate Polymarket taker fee for a given price and category.
+        
+        Fees are dynamic and peak around 50¢ prices, tapering to zero near 0¢/100¢.
+        Returns the estimated fee as a dollar amount per $1 of bet size.
+        
+        Current peak rates (pre-March 30, 2026):
+            Sports: 0.44%  |  After March 30: 0.75%
+            Politics/Tech: 1.00%
+            Pop Culture: 1.25%
+            Crypto: 1.56% → 1.80%
+        """
+        # Peak fee rates by category (as of March 30, 2026 schedule)
+        SPORTS_TAGS = {"100381", "100382", "100383", "100384", "100401", "100101", "100102"}
+        POLITICS_TAGS = {"100701"}
+        TECH_TAGS = {"100601"}
+        POP_CULTURE_TAGS = {"100801"}
+        
+        tag = str(tag_id)
+        if tag in SPORTS_TAGS:
+            peak_rate = 0.0075  # 0.75%
+        elif tag in POLITICS_TAGS or tag in TECH_TAGS:
+            peak_rate = 0.0100  # 1.00%
+        elif tag in POP_CULTURE_TAGS:
+            peak_rate = 0.0125  # 1.25%
+        else:
+            peak_rate = 0.0100  # Default conservative
+        
+        # Fees peak at price=0.50, taper toward 0 and 1
+        # Using a simple parabolic model: fee_rate = peak_rate * 4 * price * (1 - price)
+        fee_rate = peak_rate * 4 * price * (1 - price)
+        
+        return fee_rate
+
+

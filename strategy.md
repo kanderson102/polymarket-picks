@@ -30,7 +30,7 @@ If a trader logs a `75%` lifetime win rate in the database, the bot mathematical
 
 ## 2. Active Risk Guardrails
 
-*   **The "No Chase" Limit (Slippage):** The bot calculates the exact price the target paid. If the current market price is more than **2.5%** higher, the bot triggers a `TEMPORARY_REJECT`. It puts the trade on a watch-list and waits for the price to dip back down before buying.
+*   **The "No Chase" Limit (Slippage):** The bot queries the CLOB order book for the current best ask price and compares it to the specialist's entry price (`avgPrice`). If the market price is more than **2.5%** higher, the bot triggers a `TEMPORARY_REJECT` and waits for the price to come back down.
 *   **Collision Detection:** The bot actively scans your SQL database for `PENDING` active positions. Overlapping/Opposing orders are aborted instantly.
 *   **Adaptive Value Caps:** Certain categories are naturally priced higher. The bot enforces strict limits on how much it is willing to pay per share.
     *   `Tech:` Max $0.90 (Supports Clear-Win strategies natively found in Tech markets).
@@ -39,6 +39,29 @@ If a trader logs a `75%` lifetime win rate in the database, the bot mathematical
     *   `Politics:` Max $0.55 (Due to extreme volatility and inaccurate polling).
 *   **Order Book Depth Check:** Before executing any trade, the bot queries the CLOB order book to verify sufficient liquidity exists (at least 2× the bet size across top 3 price levels). This prevents slippage on larger positions.
 *   **Auto-Resolution:** The bot automatically checks all PENDING trades each polling cycle against the Gamma API. When a market resolves, trades are marked WON or LOST with Telegram notifications including P&L.
+*   **Win Rate Bootstrapping:** New traders with <5 resolved trades default to a 50% win rate (neutral 1.0x multiplier). Untested traders do NOT get outsized bets.
+
+### Smart Date Filter (Liquidity Protection)
+To prevent long-term capital lockup while still catching multi-week events:
+
+| Category | Max Days | Rationale |
+|----------|----------|-----------|
+| Sports (NBA, Soccer, MLB, NHL, Tennis, NCAAM) | 30 days | Covers playoff series & tournaments; rejects season/championship futures |
+| Politics, Tech, Pop Culture | 14 days | Short-term events only; blocks election cycles & long-term bets |
+| Default / Unknown | 14 days | Conservative fallback |
+
+### Polymarket Fee Schedule
+Polymarket uses a **maker-taker** fee model. As a taker (market buy/sell), fees are dynamic based on share price — peaking at 50¢ and tapering to zero near 0¢/100¢. **No separate gas fees** on Polygon L2.
+
+| Category | Peak Fee Rate | Notes |
+|----------|---------------|-------|
+| Sports | 0.75% | Cheapest; was 0.44% pre-March 30 |
+| Politics / Tech | 1.00% | |
+| Pop Culture | 1.25% | |
+| Crypto | 1.80% | We don't trade crypto |
+| Geopolitical | 0% | Permanently fee-free |
+
+At Phase 1 bet sizes ($1–3), fees are ~$0.01–0.03 per trade. Tracked in Telegram notifications.
 
 ---
 
@@ -50,6 +73,9 @@ The bot uses a **dual-layer detection system**:
 *   Connects to `wss://ws-subscriptions-clob.polymarket.com/ws/market`
 *   Sub-second latency for detecting specialist trades
 *   Auto-reconnects with exponential backoff (5s, 10s, 20s...)
+*   **Circuit breaker:** After 50 rapid reconnect loops, backs off to 5-minute intervals (prevents log spam)
+*   **Stable-connection reset:** Only resets reconnect counter after connection is stable for 30+ seconds
+*   **Log deduplication:** Suppresses repeated identical WS error messages
 *   Sends Telegram alert after 5 failed reconnection attempts
 *   Falls back to HTTP polling when disconnected
 
@@ -60,6 +86,12 @@ The bot uses a **dual-layer detection system**:
 
 ### Tag Matching
 The bot cross-references the Gamma API (`/events?slug=X`) to get real market tags instead of assuming the specialist only trades in their assigned domain. If the market's actual tags don't match the specialist's allowed tags, the trade is rejected with a `TAG MISMATCH` log.
+
+### Real Wallet Balance
+The bot queries your actual USDC balance on Polygon via Alchemy RPC (`get_wallet_balance()`) instead of using a hardcoded value. The balance is cached for 60 seconds and used for position sizing, exposure calculations, and Telegram summaries.
+
+### Log Rotation
+Logs use `RotatingFileHandler` with 5MB max file size and 3 backup files (15MB total max).
 
 ---
 

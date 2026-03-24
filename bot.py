@@ -2,6 +2,7 @@ import time
 import requests
 import os
 import logging
+import logging.handlers
 import threading
 from dotenv import load_dotenv
 from finance import FinanceController
@@ -11,13 +12,18 @@ load_dotenv()
 from database import TradingDB
 from dataclasses import dataclass
 from datetime import datetime, timezone, timedelta
+from web3 import Web3
 
-# Set up logging to both console and a file
+# Set up logging with rotation (5MB max, 3 backups = 15MB total)
+log_path = os.path.join(os.path.dirname(__file__), "polymarket_bot.log")
+rotating_handler = logging.handlers.RotatingFileHandler(
+    log_path, maxBytes=5 * 1024 * 1024, backupCount=3
+)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(os.path.join(os.path.dirname(__file__), "polymarket_bot.log")),
+        rotating_handler,
         logging.StreamHandler()
     ]
 )
@@ -46,8 +52,31 @@ TAG_MAP = {
     "100601": "Tech", "100701": "Politics", "100801": "Pop Culture"
 }
 
+# Sports tags get 30-day window; everything else gets 14-day window
+SPORTS_TAGS = {"100381", "100382", "100383", "100384", "100401", "100101", "100102"}
+MAX_DAYS_SPORTS = 30   # Catches playoff series, multi-round tournaments
+MAX_DAYS_DEFAULT = 14  # Politics, Tech, Pop Culture — short-term events only
+
+# USDC contract on Polygon (PoS bridged)
+USDC_CONTRACT = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+# Also check native USDC
+USDCE_CONTRACT = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
+
+# ERC-20 balanceOf ABI (minimal)
+ERC20_ABI = [{
+    "constant": True,
+    "inputs": [{"name": "_owner", "type": "address"}],
+    "name": "balanceOf",
+    "outputs": [{"name": "balance", "type": "uint256"}],
+    "type": "function"
+}]
+
 # Cache for market tag lookups (event_slug -> list of tag IDs)
 _tag_cache = {}
+
+# Wallet balance cache (value, timestamp)
+_balance_cache = {"value": None, "timestamp": 0}
+BALANCE_CACHE_TTL = 60  # seconds
 
 
 def lookup_market_tags(event_slug: str) -> list[str]:
@@ -77,6 +106,72 @@ def lookup_market_tags(event_slug: str) -> list[str]:
     return []
 
 
+def get_wallet_balance() -> float:
+    """Query the bot wallet's USDC balance on Polygon via Alchemy RPC.
+    Returns balance in dollars. Caches for BALANCE_CACHE_TTL seconds."""
+    now = time.time()
+    if _balance_cache["value"] is not None and (now - _balance_cache["timestamp"]) < BALANCE_CACHE_TTL:
+        return _balance_cache["value"]
+    
+    rpc_url = os.environ.get("ALCHEMY_POLYGON_URL", "")
+    wallet = os.environ.get("BOT_WALLET_ADDRESS", "")
+    
+    if not rpc_url or not wallet:
+        logging.warning("Missing ALCHEMY_POLYGON_URL or BOT_WALLET_ADDRESS — cannot query balance")
+        return 0.0
+    
+    try:
+        w3 = Web3(Web3.HTTPProvider(rpc_url))
+        wallet_addr = Web3.to_checksum_address(wallet)
+        total = 0.0
+        
+        # Check both USDC variants on Polygon
+        for contract_addr, decimals in [(USDC_CONTRACT, 6), (USDCE_CONTRACT, 6)]:
+            try:
+                contract = w3.eth.contract(
+                    address=Web3.to_checksum_address(contract_addr),
+                    abi=ERC20_ABI
+                )
+                raw_balance = contract.functions.balanceOf(wallet_addr).call()
+                total += raw_balance / (10 ** decimals)
+            except Exception:
+                pass  # Contract may not exist or be different on this chain
+        
+        _balance_cache["value"] = total
+        _balance_cache["timestamp"] = now
+        logging.debug(f"💰 Wallet balance: ${total:.2f} USDC")
+        return total
+        
+    except Exception as e:
+        logging.error(f"Failed to query wallet balance: {e}")
+        # Return cached value if available, else 0
+        return _balance_cache["value"] if _balance_cache["value"] is not None else 0.0
+
+
+def get_best_ask(asset_id: str) -> float:
+    """Get the current best ask price from the CLOB order book.
+    Returns 0.0 if the order book is unavailable."""
+    try:
+        resp = requests.get(f"{CLOB_URL}/book?token_id={asset_id}", timeout=3)
+        if resp.status_code == 200:
+            book = resp.json()
+            asks = book.get('asks', [])
+            if asks:
+                return float(asks[0].get('price', 0))
+    except Exception as e:
+        logging.debug(f"Best ask lookup failed for {asset_id}: {e}")
+    return 0.0
+
+
+def get_max_days_for_tags(market_tags: list[str]) -> int:
+    """Return the max allowed days-to-expiry based on market category tags.
+    Sports get 30 days (playoff series, tournaments). Everything else gets 14 days."""
+    for tag in market_tags:
+        if tag in SPORTS_TAGS:
+            return MAX_DAYS_SPORTS
+    return MAX_DAYS_DEFAULT
+
+
 class PolymarketBot:
     def __init__(self):
         self.db = TradingDB()
@@ -84,9 +179,10 @@ class PolymarketBot:
         self.watched_positions = set()
         self.ws_listener = None
         
-        # Load Baseline
+        # Query real wallet balance on startup
+        wallet_balance = get_wallet_balance()
         baseline, _ = self.db.get_performance()
-        logging.info(f"🤖 Bot Initialized. Current Run Baseline: ${baseline}")
+        logging.info(f"🤖 Bot Initialized. Wallet: ${wallet_balance:.2f} USDC | Baseline: ${baseline}")
         
         # Pre-seed seen_positions so restarts don't re-trigger existing trades
         self._preseed_seen_positions()
@@ -134,7 +230,8 @@ class PolymarketBot:
 
     def generate_hourly_summary(self):
         exposure = self.db.get_total_pending_exposure()
-        balance = max(0.0, 50.0 - exposure)
+        wallet_balance = get_wallet_balance()
+        available = max(0.0, wallet_balance - exposure)
         
         recent = self.db.get_all_recent_trades(limit=500)
         wins = sum(1 for t in recent if t[4] == 'WON')
@@ -161,8 +258,9 @@ class PolymarketBot:
         lines = [
             "📊 Hourly Summary",
             "",
-            f"💰 Balance: ${balance:.2f}",
+            f"💰 Wallet: ${wallet_balance:.2f} USDC",
             f"📈 Exposure: ${exposure:.2f} across {pending} pending",
+            f"💵 Available: ${available:.2f}",
             f"💵 Realized P&L: ${total_pnl:+.2f}",
             "",
             f"✅ {wins} Wins / ❌ {losses} Losses ({win_pct})",
@@ -313,7 +411,11 @@ class PolymarketBot:
                                 outcome = pos.get('outcome', 'Yes')
                                 
                                 if size > 0:
-                                    # Date constraint logic (Reject >7 days out, Reject past markets)
+                                    # Real tag matching: look up actual market tags from Gamma API
+                                    # (do this FIRST so we can use tags for date filter)
+                                    market_tags = lookup_market_tags(slug) if slug else []
+                                    
+                                    # Smart date filter — tiered by category
                                     endDate_str = pos.get('endDate', '')
                                     if endDate_str:
                                         try:
@@ -323,16 +425,16 @@ class PolymarketBot:
                                             
                                             if end_dt < now:
                                                 self.seen_positions.add(pos_id)
-                                                continue # Skip past matches (resolution delays prevent ghost trades)
-                                                
-                                            if (end_dt - now).days > 7:
+                                                continue  # Skip past markets
+                                            
+                                            max_days = get_max_days_for_tags(market_tags)
+                                            days_out = (end_dt - now).days
+                                            if days_out > max_days:
                                                 self.seen_positions.add(pos_id)
-                                                continue # Skip long-term capital lockup
+                                                logging.info(f"⏰ SKIP {spec.name} | {market} | {days_out}d out (max {max_days}d for category)")
+                                                continue
                                         except ValueError:
                                             pass
-                                    
-                                    # Real tag matching: look up actual market tags from Gamma API
-                                    market_tags = lookup_market_tags(slug) if slug else []
                                     
                                     # Find the best matching tag between market and specialist
                                     matched_tag = None
@@ -351,9 +453,15 @@ class PolymarketBot:
                                         tag_names = [TAG_MAP.get(t, t) for t in market_tags[:3]]
                                         logging.info(f"⛔ TAG MISMATCH {spec.name} | {market} | Market tags: {tag_names}")
                                         continue
-                                            
-                                    # We mock leader price as price * 0.98 for the Phase 1 test
-                                    status, msg_reason, bet_size = self.execute_trade_logic(spec, matched_tag, price, price * 0.98, market)
+                                    
+                                    # Get real market price from CLOB for slippage check
+                                    # leader_price = specialist's avgPrice (what they paid)
+                                    # current_market_price = best ask on the order book (what we'd pay)
+                                    current_market_price = get_best_ask(pos_id)
+                                    if current_market_price <= 0:
+                                        current_market_price = price  # Fallback to avgPrice if CLOB unavailable
+                                    
+                                    status, msg_reason, bet_size = self.execute_trade_logic(spec, matched_tag, current_market_price, price, market)
                                     
                                     if status == "PASSED":
                                         # Order book depth check before final execution
@@ -366,21 +474,23 @@ class PolymarketBot:
                                         # Inject real trade object back to Database
                                         self.db.add_trade(spec.name, market, price, slug, outcome, bet_size, endDate_str)
                                         
-                                        remaining = max(0.0, 50.0 - self.db.get_total_pending_exposure())
+                                        wallet_bal = get_wallet_balance()
+                                        remaining = max(0.0, wallet_bal - self.db.get_total_pending_exposure())
+                                        est_fee = FinanceController.estimate_taker_fee(current_market_price, matched_tag) * bet_size
                                         link = f"https://polymarket.com/event/{slug}" if slug else ""
                                         msg = "\n".join([
                                             "✅ COPIED TRADE",
                                             "",
                                             f"📋 {market}",
                                             f"👤 {spec.name} ({spec.tier})",
-                                            f"🎯 {outcome} @ ${price:.2f}",
-                                            f"💵 Bet: ${bet_size:.2f}",
+                                            f"🎯 {outcome} @ ${current_market_price:.2f}",
+                                            f"💵 Bet: ${bet_size:.2f} (est. fee: ${est_fee:.3f})",
                                             f"💰 Balance: ${remaining:.2f}",
                                             "",
                                             link
                                         ])
                                         self.send_telegram_alert(msg)
-                                        logging.info(f"✅ COPIED TRADE {spec.name} | {market} | {outcome} @ ${price:.2f} | Bet ${bet_size:.2f} | Bal ${remaining:.2f}")
+                                        logging.info(f"✅ COPIED TRADE {spec.name} | {market} | {outcome} @ ${current_market_price:.2f} | Bet ${bet_size:.2f} | Fee ~${est_fee:.3f} | Bal ${remaining:.2f}")
                                         
                                     elif status == "PERMANENT_REJECT":
                                         self.seen_positions.add(pos_id)
@@ -438,20 +548,22 @@ class PolymarketBot:
             return "TEMPORARY_REJECT", f"Current Price {current_price} exceeds Value Cap {max_entry}", 0.0
 
         # 4. No Chase / Slippage Check
+        # leader_price = specialist's entry price (avgPrice)
+        # current_price = current best ask on the order book
         if not FinanceController.is_slippage_acceptable(leader_price, current_price):
-            return "TEMPORARY_REJECT", f"Price slipped too far from Leader's price of {leader_price}", 0.0
+            return "TEMPORARY_REJECT", f"Price slipped to ${current_price:.3f} vs specialist's ${leader_price:.3f} (>{2.5}% gap)", 0.0
 
-        # 5. Position Sizing
-        # Mocking balance fetch for Phase 1 Validation dynamically via Local exposure
-        current_wallet_balance = max(0.0, 50.0 - self.db.get_total_pending_exposure())
+        # 5. Position Sizing — use real wallet balance
+        wallet_balance = get_wallet_balance()
+        current_available = max(0.0, wallet_balance - self.db.get_total_pending_exposure())
         
-        if current_wallet_balance < 5.0:
-            return "TEMPORARY_REJECT", "Insufficient Buffer (Bankroll hit $5.00 fail-safe)", 0.0
+        if current_available < 5.0:
+            return "TEMPORARY_REJECT", f"Insufficient Buffer (${current_available:.2f} available, $5.00 minimum)", 0.0
             
-        # Calculate bet size using baseline 50 for generic scaling math, but clamp to available balance so it halts naturally
-        bet_size = FinanceController.calculate_bet_size(50.0, specialist.tier, win_rate)
-        if bet_size > current_wallet_balance:
-            bet_size = current_wallet_balance
+        # Calculate bet size using actual wallet balance for dynamic scaling
+        bet_size = FinanceController.calculate_bet_size(wallet_balance, specialist.tier, win_rate)
+        if bet_size > current_available:
+            bet_size = current_available
 
         return "PASSED", f"Validated for ${bet_size:.2f} bet", float(bet_size)
 

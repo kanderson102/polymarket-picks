@@ -153,10 +153,12 @@ class TradingDB:
     def get_specialist_win_rate(self, specialist: str) -> float:
         """
         Calculates the win rate of the specialist over their last 10 RESOLVED trades.
+        Returns 50% (neutral 1.0x multiplier) for traders with fewer than 5 resolved trades,
+        preventing untested traders from getting outsized bet allocations.
         """
         trades = self.get_specialist_recent_trades(specialist, 10)
-        if not trades:
-            return 100.0  # Default to 100% until proven otherwise
+        if len(trades) < 5:
+            return 50.0  # Neutral multiplier until proven with ≥5 resolved trades
             
         wins = sum(1 for t in trades if t[0] == 'WON')
         return (wins / len(trades)) * 100
