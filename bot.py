@@ -45,11 +45,41 @@ class PolymarketBot:
     def __init__(self):
         self.db = TradingDB()
         self.seen_positions = set()
-        self.watched_positions = set() # Track positions waiting for a price drop without spamming logs
+        self.watched_positions = set()
         
         # Load Baseline
         baseline, _ = self.db.get_performance()
         logging.info(f"🤖 Bot Initialized. Current Run Baseline: ${baseline}")
+        
+        # Pre-seed seen_positions so restarts don't re-trigger existing trades
+        self._preseed_seen_positions()
+    
+    def _preseed_seen_positions(self):
+        """On startup, scan specialist positions and mark any that already have
+        PENDING trades in the DB as 'seen' so they aren't re-processed."""
+        pending_trades = self.db.get_all_recent_trades(limit=500)
+        active_markets = {t[1] for t in pending_trades if t[4] == 'PENDING'}  # market names
+        
+        if not active_markets:
+            return
+            
+        db_specs = self.db.get_all_specialists()
+        for spec in db_specs:
+            if not spec.get('is_active', True) or 'MOCK' in spec['wallet']:
+                continue
+            try:
+                resp = requests.get(f"{DATA_API_URL}/positions?user={spec['wallet']}", timeout=10)
+                if resp.status_code == 200:
+                    for pos in resp.json():
+                        title = pos.get('title', '')
+                        asset = pos.get('asset', '')
+                        if asset and title in active_markets:
+                            self.seen_positions.add(asset)
+            except Exception:
+                pass
+        
+        if self.seen_positions:
+            logging.info(f"🔄 Pre-seeded {len(self.seen_positions)} positions from existing DB trades")
 
     def send_telegram_alert(self, message: str):
         token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip("\"'")
@@ -174,8 +204,10 @@ class PolymarketBot:
                                         
                                     elif status == "PERMANENT_REJECT":
                                         self.seen_positions.add(pos_id)
-                                        msg = f"⛔ SKIP {spec.name}\n{market}\n{msg_reason}"
-                                        self.send_telegram_alert(msg)
+                                        # Only send Telegram for interesting rejects, not "already holding" noise
+                                        if "Already holding" not in msg_reason:
+                                            msg = f"⛔ SKIP {spec.name}\n{market}\n{msg_reason}"
+                                            self.send_telegram_alert(msg)
                                         logging.warning(f"⛔ REJECT {spec.name} | {market} | {msg_reason}")
                                         
                                     elif status == "TEMPORARY_REJECT":
