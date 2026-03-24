@@ -160,4 +160,15 @@ class FinanceController:
         
         return fee_rate
 
+    @staticmethod
+    def calculate_slippage_pct(leader_price: float, market_price: float) -> float:
+        """
+        Calculate the percentage difference between leader price and our market price.
+        Positive means we paid more (bad slippage).
+        """
+        if leader_price <= 0:
+            return 0.0
+        return ((market_price - leader_price) / leader_price) * 100
+
+
 

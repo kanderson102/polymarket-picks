@@ -37,6 +37,8 @@ class TradingDB:
                 "ALTER TABLE trades ADD COLUMN outcome TEXT DEFAULT 'Yes'",
                 "ALTER TABLE trades ADD COLUMN bet_size REAL DEFAULT 0",
                 "ALTER TABLE trades ADD COLUMN end_date TEXT DEFAULT ''",
+                "ALTER TABLE trades ADD COLUMN leader_price REAL DEFAULT 0",
+                "ALTER TABLE trades ADD COLUMN market_price REAL DEFAULT 0",
             ]:
                 try:
                     cursor.execute(migration)
@@ -113,12 +115,12 @@ class TradingDB:
             """)
             conn.commit()
 
-    def add_trade(self, specialist: str, market: str, entry_price: float, slug: str = "", outcome: str = "Yes", bet_size: float = 0.0, end_date: str = "") -> int:
+    def add_trade(self, specialist: str, market: str, entry_price: float, slug: str = "", outcome: str = "Yes", bet_size: float = 0.0, end_date: str = "", leader_price: float = 0.0, market_price: float = 0.0) -> int:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "INSERT INTO trades (specialist, market, entry_price, slug, outcome, bet_size, end_date) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (specialist, market, entry_price, slug, outcome, bet_size, end_date)
+                "INSERT INTO trades (specialist, market, entry_price, slug, outcome, bet_size, end_date, leader_price, market_price) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (specialist, market, entry_price, slug, outcome, bet_size, end_date, leader_price, market_price)
             )
             conn.commit()
             return cursor.lastrowid
@@ -169,7 +171,7 @@ class TradingDB:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT market, entry_price, timestamp, result, slug, outcome, bet_size, end_date 
+                SELECT market, entry_price, timestamp, result, slug, outcome, bet_size, end_date, leader_price, market_price 
                 FROM trades 
                 WHERE specialist = ? 
                 ORDER BY timestamp DESC
@@ -201,7 +203,7 @@ class TradingDB:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                SELECT specialist, market, entry_price, timestamp, result, slug, outcome, bet_size, end_date 
+                SELECT specialist, market, entry_price, timestamp, result, slug, outcome, bet_size, end_date, leader_price, market_price 
                 FROM trades 
                 ORDER BY timestamp DESC 
                 LIMIT ?

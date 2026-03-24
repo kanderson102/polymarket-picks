@@ -240,19 +240,25 @@ class PolymarketBot:
         total_resolved = wins + losses
         win_pct = f"{(wins/total_resolved*100):.0f}%" if total_resolved > 0 else "N/A"
         
-        # Calculate P&L from resolved trades
+        # Calculate P&L and Slippage from recent trades
         total_pnl = 0.0
+        slippages = []
         for t in recent:
+            # P&L
             if t[4] == 'WON':
                 bet_size = t[7] if t[7] and t[7] > 0 else t[2]
                 entry_price = t[2]
-                # Won: payout is bet_size / entry_price (shares * $1), profit = payout - bet_size
                 if entry_price > 0:
                     total_pnl += (bet_size / entry_price) - bet_size
             elif t[4] == 'LOST':
                 bet_size = t[7] if t[7] and t[7] > 0 else t[2]
                 total_pnl -= bet_size
+            
+            # Slippage (t[9]=leader_price, t[10]=market_price)
+            if len(t) > 10 and t[9] > 0 and t[10] > 0:
+                slippages.append(FinanceController.calculate_slippage_pct(t[9], t[10]))
         
+        avg_slippage = sum(slippages) / len(slippages) if slippages else 0.0
         ws_status = "🟢 WS" if (self.ws_listener and self.ws_listener.is_connected) else "🔴 WS"
         
         lines = [
@@ -262,6 +268,7 @@ class PolymarketBot:
             f"📈 Exposure: ${exposure:.2f} across {pending} pending",
             f"💵 Available: ${available:.2f}",
             f"💵 Realized P&L: ${total_pnl:+.2f}",
+            f"📉 Avg Slippage: {avg_slippage:+.2f}%",
             "",
             f"✅ {wins} Wins / ❌ {losses} Losses ({win_pct})",
             "",
@@ -471,12 +478,16 @@ class PolymarketBot:
                                             # Still proceed but note it — at Phase 1 sizes this is rarely an issue
                                         
                                         self.seen_positions.add(pos_id)
-                                        # Inject real trade object back to Database
-                                        self.db.add_trade(spec.name, market, price, slug, outcome, bet_size, endDate_str)
+                                        # Inject real trade object back to Database with slippage info
+                                        # price = leader_price (specialist's avgPrice)
+                                        # current_market_price = our detection price
+                                        self.db.add_trade(spec.name, market, current_market_price, slug, outcome, bet_size, endDate_str, price, current_market_price)
                                         
                                         wallet_bal = get_wallet_balance()
                                         remaining = max(0.0, wallet_bal - self.db.get_total_pending_exposure())
                                         est_fee = FinanceController.estimate_taker_fee(current_market_price, matched_tag) * bet_size
+                                        slippage = FinanceController.calculate_slippage_pct(price, current_market_price)
+                                        
                                         link = f"https://polymarket.com/event/{slug}" if slug else ""
                                         msg = "\n".join([
                                             "✅ COPIED TRADE",
@@ -485,12 +496,13 @@ class PolymarketBot:
                                             f"👤 {spec.name} ({spec.tier})",
                                             f"🎯 {outcome} @ ${current_market_price:.2f}",
                                             f"💵 Bet: ${bet_size:.2f} (est. fee: ${est_fee:.3f})",
+                                            f"📉 Slippage: {slippage:+.2f}%",
                                             f"💰 Balance: ${remaining:.2f}",
                                             "",
                                             link
                                         ])
                                         self.send_telegram_alert(msg)
-                                        logging.info(f"✅ COPIED TRADE {spec.name} | {market} | {outcome} @ ${current_market_price:.2f} | Bet ${bet_size:.2f} | Fee ~${est_fee:.3f} | Bal ${remaining:.2f}")
+                                        logging.info(f"✅ COPIED TRADE {spec.name} | {market} | {outcome} @ ${current_market_price:.2f} | Bet ${bet_size:.2f} | Slippage {slippage:+.2f}% | Bal ${remaining:.2f}")
                                         
                                     elif status == "PERMANENT_REJECT":
                                         self.seen_positions.add(pos_id)
