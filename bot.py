@@ -8,7 +8,7 @@ from finance import FinanceController
 load_dotenv()
 from database import TradingDB
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
 # Set up logging to both console and a file
 logging.basicConfig(
@@ -88,17 +88,23 @@ class PolymarketBot:
     def monitor_loop(self):
         logging.info("Starting real-time Gamma API polling loop...")
         self.send_telegram_alert("🚀 Polymarket Copy-Bot Started and Monitoring!")
-        last_summary_time = time.time()
+        EST = timezone(timedelta(hours=-5))
+        SUMMARY_HOURS = {8, 12, 16, 20}  # 8am, 12pm, 4pm, 8pm EST
+        sent_summary_for = set()  # Track which hours we already sent
         
         while True:
             try:
                 self.db.record_heartbeat()
                 
-                # Check for hourly summary trigger
-                if time.time() - last_summary_time >= 3600:
+                # Send summary at 8am, 12pm, 4pm, 8pm EST
+                now_est = datetime.now(EST)
+                hour_key = (now_est.date(), now_est.hour)
+                if now_est.hour in SUMMARY_HOURS and hour_key not in sent_summary_for:
                     summary_msg = self.generate_hourly_summary()
                     self.send_telegram_alert(summary_msg)
-                    last_summary_time = time.time()
+                    sent_summary_for.add(hour_key)
+                    # Keep set small: clear entries older than today
+                    sent_summary_for = {k for k in sent_summary_for if k[0] >= now_est.date()}
                 
                 db_specs = self.db.get_all_specialists()
                 dynamic_specialists = [Specialist(s["name"], s["wallet"], s["tags"], s.get("tier", "SHARP"), s.get("is_active", True)) for s in db_specs]
