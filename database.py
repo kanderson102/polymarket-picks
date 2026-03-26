@@ -84,12 +84,13 @@ class TradingDB:
                 defaults = [
                     ("S-Works", "0xee00ba338c59557141789b127927a55f5cc5cea1", "100101,100102,100381", "SHARP"),
                     ("reachingthesky", "0xefbc5fec8d7b0acdc8911bdd9a98d6964308f9a2", "100101,100102", "SHARP"),
-                    ("HorizonSplendidView", "0x02227b8f5a9636e895607edd3185ed6ee5598ff7", "100101,100102", "SHARP"),
-                    ("CemeterySun", "0x37c1874a60d348903594a96703e0507c518fc53a", "100381,100101,100384", "SHARP"),
+                    ("HorizonSplendidView", "0x02227b8f5a9636e895607edd3185ed6ee5598ff7", "100383", "SHARP"),
+                    ("CemeterySun", "0x37c1874a60d348903594a96703e0507c518fc53a", "100384,100401", "SHARP"),
+                    ("aenews", "0x44c1dfe43260c94ed4f1d00de2e1f80fb113ebc1", "100701", "WHALE"),
                     ("LlamaEnjoyer", "0x9b979a065641e8cfde3022a30ed2d9415cf55e12", "100801", "WHALE"),
                     ("beachboy4", "0xc2e7800b5af46e6093872b177b7a5e7f0563be51", "100381,100101,100102", "SHARP"),
                     ("CERTuo", "0xf195721ad850377c96cd634457c70cd9e8308057", "100384", "SHARP"),
-                    ("majorexploiter", "0x019782cab5d844f02bafb71f512758be78579f3c", "100101,100102", "SHARP")
+                    ("majorexploiter", "0x019782cab5d844f02bafb71f512758be78579f3c", "100101,100102", "SHARP"),
                 ]
                 cursor.executemany("INSERT INTO specialists (name, wallet_address, target_tags, tier) VALUES (?, ?, ?, ?)", defaults)
                 
@@ -248,6 +249,11 @@ class TradingDB:
     def add_specialist(self, name: str, wallet: str, tags: str, tier: str = 'SHARP'):
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
+            # Wallet address deduplication — prevent adding the same wallet twice
+            cursor.execute("SELECT name FROM specialists WHERE wallet_address = ?", (wallet,))
+            existing = cursor.fetchone()
+            if existing:
+                raise ValueError(f"Wallet {wallet} is already assigned to specialist '{existing[0]}'")
             cursor.execute("INSERT INTO specialists (name, wallet_address, target_tags, tier) VALUES (?, ?, ?, ?)", (name, wallet, tags, tier))
             conn.commit()
             
@@ -260,6 +266,11 @@ class TradingDB:
     def update_specialist_wallet(self, name: str, new_wallet: str):
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
+            # Wallet address deduplication — prevent reassigning to an existing wallet
+            cursor.execute("SELECT name FROM specialists WHERE wallet_address = ? AND name != ?", (new_wallet, name))
+            existing = cursor.fetchone()
+            if existing:
+                raise ValueError(f"Wallet {new_wallet} is already assigned to specialist '{existing[0]}'")
             cursor.execute("UPDATE specialists SET wallet_address = ? WHERE name = ?", (new_wallet, name))
             conn.commit()
 

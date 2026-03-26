@@ -468,7 +468,7 @@ class PolymarketBot:
                                     if current_market_price <= 0:
                                         current_market_price = price  # Fallback to avgPrice if CLOB unavailable
                                     
-                                    status, msg_reason, bet_size = self.execute_trade_logic(spec, matched_tag, current_market_price, price, market)
+                                    status, msg_reason, bet_size = self.execute_trade_logic(spec, matched_tag, current_market_price, price, market, slug, outcome)
                                     
                                     if status == "PASSED":
                                         # Order book depth check before final execution
@@ -526,19 +526,28 @@ class PolymarketBot:
                 
             time.sleep(POLL_INTERVAL)
 
-    def execute_trade_logic(self, specialist: Specialist, market_tag: str, current_price: float, leader_price: float, market_name: str):
+    def execute_trade_logic(self, specialist: Specialist, market_tag: str, current_price: float, leader_price: float, market_name: str, slug: str = "", outcome: str = ""):
         """
         Runs the full check based on the PRD before sending the CLOB API order.
         Returns a tuple: (Status, Reason_String, Bet_Size)
         Status can be "PASSED", "PERMANENT_REJECT", or "TEMPORARY_REJECT".
         """
         # 0. Collision Check / Opposing Bets
-        # If we already have a PENDING active position in this same exact market, 
-        # do not buy again. Prevents paying fees to wash ourselves out or taking both YES and NO.
+        # Check by slug+outcome (reliable) with market name fallback for old trades without slugs.
+        # Prevents paying fees to wash ourselves out or taking both YES and NO on the same market.
         recent_trades = self.db.get_all_recent_trades(50)
-        active_markets = [t[1] for t in recent_trades if t[4] == 'PENDING']
-        if market_name in active_markets:
-            return "PERMANENT_REJECT", f"Already holding an active position in {market_name}", 0.0
+        for t in recent_trades:
+            if t[4] != 'PENDING':
+                continue
+            trade_slug = t[5] if len(t) > 5 else ''
+            trade_outcome = t[6] if len(t) > 6 else ''
+            # Primary check: same slug and same outcome
+            if slug and trade_slug and slug == trade_slug and outcome == trade_outcome:
+                return "PERMANENT_REJECT", f"Already holding {outcome} on {market_name}", 0.0
+            # Fallback: same market name (for trades without slugs)
+            if not slug or not trade_slug:
+                if t[1] == market_name:
+                    return "PERMANENT_REJECT", f"Already holding an active position in {market_name}", 0.0
 
         # 1. Health Monitor Check
         win_rate = self.db.get_specialist_win_rate(specialist.name)

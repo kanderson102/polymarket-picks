@@ -1,8 +1,10 @@
 import streamlit as st
 import pandas as pd
+import numpy as np
 import os
 from dotenv import load_dotenv
 from database import TradingDB
+from finance import FinanceController
 
 load_dotenv()
 
@@ -29,10 +31,12 @@ def main():
     db = TradingDB()
 
     st.sidebar.title("Navigation")
-    page = st.sidebar.radio("Go to", ["Dashboard", "Strategy & SOP", "Architecture & Deployment", "Logs"])
+    page = st.sidebar.radio("Go to", ["Dashboard", "Backtest Simulator", "Strategy & SOP", "Architecture & Deployment", "Logs"])
 
     if page == "Dashboard":
         render_dashboard(db)
+    elif page == "Backtest Simulator":
+        render_backtest(db)
     elif page == "Strategy & SOP":
         render_strategy()
     elif page == "Architecture & Deployment":
@@ -155,9 +159,14 @@ def render_dashboard(db):
                     if not vetted:
                         st.error("⚠️ You must verify their historical category win-rate before placing them onto the active roster!")
                     else:
-                        db.add_specialist(new_name, new_wallet, new_tags, new_tier)
-                        st.success(f"Added {new_name} as {new_tier}!")
-                        st.rerun()
+                        try:
+                            db.add_specialist(new_name, new_wallet, new_tags, new_tier)
+                            st.success(f"Added {new_name} as {new_tier}!")
+                            st.rerun()
+                        except ValueError as e:
+                            st.error(f"Duplicate wallet: {e}")
+                        except Exception as e:
+                            st.error(f"Failed to add: {e}")
                 else:
                     st.error("Please fill all fields.")
                     
@@ -211,10 +220,13 @@ def render_dashboard(db):
                     if st.button("Save", key=f"save_{spec['name']}"):
                         new_tags_val = ",".join([REVERSE_TAG_MAP[c] for c in selected_cats])
                         if new_wallet_val and new_tags_val:
-                            db.update_specialist_wallet(spec['name'], new_wallet_val)
-                            db.update_specialist_tags(spec['name'], new_tags_val)
-                            st.session_state[f"edit_{spec['name']}"] = False
-                            st.rerun()
+                            try:
+                                db.update_specialist_wallet(spec['name'], new_wallet_val)
+                                db.update_specialist_tags(spec['name'], new_tags_val)
+                                st.session_state[f"edit_{spec['name']}"] = False
+                                st.rerun()
+                            except ValueError as e:
+                                st.error(f"Duplicate wallet: {e}")
 
         # Trade History Expander
         with st.expander(f"📊 View Bot's Trade History for {spec['name']}"):
@@ -260,6 +272,334 @@ def render_dashboard(db):
                     st.session_state[f"confirm_delete_{spec['name']}"] = False
                     st.rerun()
         st.write("")
+
+def render_backtest(db):
+    st.title("🧪 Backtest Simulator")
+    st.markdown("Monte Carlo simulation using the bot's actual Kelly criterion sizing, value caps, slippage, and harvest logic.")
+
+    # --- Sidebar Controls ---
+    st.sidebar.markdown("---")
+    st.sidebar.header("Simulation Parameters")
+
+    bankroll = st.sidebar.number_input("Starting Bankroll ($)", min_value=10.0, max_value=100000.0, value=50.0, step=10.0)
+    days = st.sidebar.slider("Simulation Days", min_value=7, max_value=365, value=90)
+    num_simulations = st.sidebar.slider("Monte Carlo Runs", min_value=50, max_value=2000, value=500, step=50)
+
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Specialist Mix")
+    num_sharp = st.sidebar.number_input("SHARP Specialists", min_value=0, max_value=20, value=7)
+    num_whale = st.sidebar.number_input("WHALE Specialists", min_value=0, max_value=10, value=2)
+    sharp_wr = st.sidebar.slider("SHARP Avg Win Rate (%)", min_value=40.0, max_value=80.0, value=58.0, step=1.0)
+    whale_wr = st.sidebar.slider("WHALE Avg Win Rate (%)", min_value=30.0, max_value=70.0, value=48.0, step=1.0)
+
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Market Conditions")
+    trades_per_day = st.sidebar.slider("Avg Trades/Day (all specialists)", min_value=1, max_value=30, value=8)
+    avg_entry_price = st.sidebar.slider("Avg Entry Price ($)", min_value=0.10, max_value=0.90, value=0.45, step=0.05)
+    slippage_pct = st.sidebar.slider("Avg Slippage (%)", min_value=0.0, max_value=5.0, value=1.0, step=0.25)
+    avg_fee_rate = st.sidebar.slider("Avg Taker Fee (%)", min_value=0.0, max_value=2.0, value=0.75, step=0.05)
+
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Risk & Harvest")
+    enable_harvest = st.sidebar.checkbox("Enable 2x Harvest Rule", value=True)
+    min_buffer = st.sidebar.number_input("Min Buffer ($)", min_value=1.0, max_value=50.0, value=5.0, step=1.0)
+    max_slippage = st.sidebar.slider("Max Slippage Reject (%)", min_value=0.5, max_value=10.0, value=2.5, step=0.5)
+
+    if st.button("Run Simulation", type="primary"):
+        results = _run_monte_carlo(
+            bankroll=bankroll, days=days, num_simulations=num_simulations,
+            num_sharp=num_sharp, num_whale=num_whale,
+            sharp_wr=sharp_wr, whale_wr=whale_wr,
+            trades_per_day=trades_per_day, avg_entry_price=avg_entry_price,
+            slippage_pct=slippage_pct, avg_fee_rate=avg_fee_rate,
+            enable_harvest=enable_harvest, min_buffer=min_buffer,
+            max_slippage=max_slippage,
+        )
+        _render_backtest_results(results, bankroll, days, enable_harvest)
+
+
+def _run_monte_carlo(*, bankroll, days, num_simulations, num_sharp, num_whale,
+                     sharp_wr, whale_wr, trades_per_day, avg_entry_price,
+                     slippage_pct, avg_fee_rate, enable_harvest, min_buffer,
+                     max_slippage):
+    """Run Monte Carlo simulation using actual strategy parameters."""
+    rng = np.random.default_rng(seed=42)
+    total_specialists = num_sharp + num_whale
+
+    if total_specialists == 0:
+        return None
+
+    # Pre-compute specialist profiles
+    specs = []
+    for _ in range(num_sharp):
+        # Add some variance around the average win rate
+        wr = np.clip(rng.normal(sharp_wr, 4.0), 40, 85)
+        specs.append(("SHARP", wr))
+    for _ in range(num_whale):
+        wr = np.clip(rng.normal(whale_wr, 6.0), 25, 75)
+        specs.append(("WHALE", wr))
+
+    all_equity_curves = np.zeros((num_simulations, days + 1))
+    final_balances = np.zeros(num_simulations)
+    total_harvested_all = np.zeros(num_simulations)
+    total_trades_all = np.zeros(num_simulations, dtype=int)
+    total_wins_all = np.zeros(num_simulations, dtype=int)
+    total_losses_all = np.zeros(num_simulations, dtype=int)
+    total_skipped_all = np.zeros(num_simulations, dtype=int)
+    max_drawdown_all = np.zeros(num_simulations)
+
+    progress = st.progress(0, text="Running simulations...")
+
+    for sim in range(num_simulations):
+        balance = bankroll
+        baseline = bankroll
+        harvested = 0.0
+        equity = [balance]
+        peak = balance
+        max_dd = 0.0
+        wins = 0
+        losses = 0
+        skipped = 0
+        trades_count = 0
+
+        for day in range(days):
+            # Random number of trades today (Poisson distribution)
+            n_trades = rng.poisson(trades_per_day)
+
+            for _ in range(n_trades):
+                if balance < min_buffer:
+                    skipped += 1
+                    continue
+
+                # Pick a random specialist
+                idx = rng.integers(0, total_specialists)
+                tier, wr = specs[idx]
+
+                # Simulate entry price with some variance
+                entry = np.clip(rng.normal(avg_entry_price, 0.10), 0.05, 0.95)
+
+                # Value cap check
+                max_price = 0.65  # Average across categories
+                if entry > max_price:
+                    skipped += 1
+                    continue
+
+                # Slippage simulation
+                actual_slippage = abs(rng.normal(slippage_pct, 0.5))
+                if actual_slippage > max_slippage:
+                    skipped += 1
+                    continue
+
+                # Calculate bet size using actual Kelly formula
+                bet_size = FinanceController.calculate_bet_size(balance, tier, wr)
+                available = balance - min_buffer
+                if bet_size > available:
+                    bet_size = available
+                if bet_size <= 0:
+                    skipped += 1
+                    continue
+
+                # Apply slippage cost to entry price
+                effective_entry = entry * (1 + actual_slippage / 100)
+
+                # Fee cost
+                fee = bet_size * (avg_fee_rate / 100)
+
+                # Determine win/loss using specialist's actual win rate
+                won = rng.random() < (wr / 100)
+
+                trades_count += 1
+                if won:
+                    # Payout: bet_size / entry_price (shares purchased), minus fees
+                    payout = (bet_size / effective_entry) - fee
+                    profit = payout - bet_size
+                    balance += profit
+                    wins += 1
+                else:
+                    balance -= (bet_size + fee)
+                    losses += 1
+
+                balance = max(0.0, balance)
+
+                # Track drawdown
+                if balance > peak:
+                    peak = balance
+                dd = (peak - balance) / peak if peak > 0 else 0
+                if dd > max_dd:
+                    max_dd = dd
+
+            # Harvest check at end of day
+            if enable_harvest:
+                result = FinanceController.check_harvest(balance, baseline)
+                if result.triggered:
+                    harvested += result.transfer_amount
+                    balance = result.new_balance
+                    baseline = result.new_baseline
+
+            equity.append(balance + harvested)
+
+        all_equity_curves[sim] = equity
+        final_balances[sim] = balance + harvested
+        total_harvested_all[sim] = harvested
+        total_trades_all[sim] = trades_count
+        total_wins_all[sim] = wins
+        total_losses_all[sim] = losses
+        total_skipped_all[sim] = skipped
+        max_drawdown_all[sim] = max_dd
+
+        if (sim + 1) % max(1, num_simulations // 20) == 0:
+            progress.progress((sim + 1) / num_simulations, text=f"Simulation {sim+1}/{num_simulations}")
+
+    progress.empty()
+
+    return {
+        "equity_curves": all_equity_curves,
+        "final_balances": final_balances,
+        "harvested": total_harvested_all,
+        "trades": total_trades_all,
+        "wins": total_wins_all,
+        "losses": total_losses_all,
+        "skipped": total_skipped_all,
+        "max_drawdown": max_drawdown_all,
+    }
+
+
+def _render_backtest_results(results, bankroll, days, enable_harvest):
+    """Render the simulation results with highlights, charts, and tables."""
+    if results is None:
+        st.error("Add at least one specialist to run the simulation.")
+        return
+
+    finals = results["final_balances"]
+    harvested = results["harvested"]
+    trades = results["trades"]
+    wins = results["wins"]
+    losses = results["losses"]
+    skipped = results["skipped"]
+    max_dd = results["max_drawdown"]
+    curves = results["equity_curves"]
+
+    # --- Highlight Metrics ---
+    st.header("Simulation Results")
+
+    median_final = np.median(finals)
+    mean_final = np.mean(finals)
+    roi = ((median_final - bankroll) / bankroll) * 100
+
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Median Final Value", f"${median_final:.2f}", f"{roi:+.1f}% ROI")
+    col2.metric("Mean Final Value", f"${mean_final:.2f}")
+    col3.metric("Best Case (95th)", f"${np.percentile(finals, 95):.2f}")
+    col4.metric("Worst Case (5th)", f"${np.percentile(finals, 5):.2f}")
+
+    st.markdown("")
+
+    col5, col6, col7, col8 = st.columns(4)
+    col5.metric("Median Trades", f"{int(np.median(trades))}")
+    avg_wr = np.mean(wins / np.maximum(wins + losses, 1)) * 100
+    col6.metric("Avg Win Rate", f"{avg_wr:.1f}%")
+    col7.metric("Avg Max Drawdown", f"{np.mean(max_dd)*100:.1f}%")
+    if enable_harvest:
+        col8.metric("Median Harvested", f"${np.median(harvested):.2f}")
+    else:
+        col8.metric("Ruin Rate (<$5)", f"{np.mean(finals < 5)*100:.1f}%")
+
+    st.markdown("---")
+
+    # --- Equity Curve Fan Chart ---
+    st.subheader("Equity Curves (Fan Chart)")
+    st.caption("Shaded regions show 10th-90th percentile range. Bold line is the median path.")
+
+    p10 = np.percentile(curves, 10, axis=0)
+    p25 = np.percentile(curves, 25, axis=0)
+    p50 = np.percentile(curves, 50, axis=0)
+    p75 = np.percentile(curves, 75, axis=0)
+    p90 = np.percentile(curves, 90, axis=0)
+
+    day_labels = list(range(days + 1))
+    chart_df = pd.DataFrame({
+        "Day": day_labels,
+        "10th Pct": p10,
+        "25th Pct": p25,
+        "Median": p50,
+        "75th Pct": p75,
+        "90th Pct": p90,
+    }).set_index("Day")
+    st.area_chart(chart_df, color=["#ff6b6b", "#ffa94d", "#51cf66", "#339af0", "#845ef7"])
+
+    # --- Sample Paths ---
+    st.subheader("Sample Equity Paths (10 Random Runs)")
+    rng = np.random.default_rng(seed=0)
+    sample_idxs = rng.choice(len(finals), size=min(10, len(finals)), replace=False)
+    sample_df = pd.DataFrame(
+        {f"Run {i+1}": curves[idx] for i, idx in enumerate(sample_idxs)},
+        index=day_labels
+    )
+    sample_df.index.name = "Day"
+    st.line_chart(sample_df)
+
+    st.markdown("---")
+
+    # --- Final Balance Distribution ---
+    st.subheader("Final Balance Distribution")
+    hist_df = pd.DataFrame({"Final Balance ($)": finals})
+    st.bar_chart(hist_df["Final Balance ($)"].value_counts(bins=40).sort_index())
+
+    st.markdown("---")
+
+    # --- Probability Table ---
+    st.subheader("Outcome Probabilities")
+    thresholds = [
+        ("Break Even", bankroll),
+        ("1.5x ($" + f"{bankroll*1.5:.0f})", bankroll * 1.5),
+        ("2x ($" + f"{bankroll*2:.0f})", bankroll * 2),
+        ("3x ($" + f"{bankroll*3:.0f})", bankroll * 3),
+        ("5x ($" + f"{bankroll*5:.0f})", bankroll * 5),
+        ("10x ($" + f"{bankroll*10:.0f})", bankroll * 10),
+    ]
+    prob_data = []
+    for label, threshold in thresholds:
+        prob = np.mean(finals >= threshold) * 100
+        prob_data.append({"Target": label, "Probability": f"{prob:.1f}%", "Odds": f"1 in {max(1, int(100/prob))}" if prob > 0 else "Very unlikely"})
+    st.table(pd.DataFrame(prob_data))
+
+    # --- Ruin & Drawdown ---
+    st.subheader("Risk Metrics")
+    col_r1, col_r2, col_r3 = st.columns(3)
+    col_r1.metric("Ruin Rate (Balance < $1)", f"{np.mean(finals < 1)*100:.1f}%")
+    col_r2.metric("Loss Rate (Below Start)", f"{np.mean(finals < bankroll)*100:.1f}%")
+    col_r3.metric("Worst Drawdown (Median)", f"{np.median(max_dd)*100:.1f}%")
+
+    st.markdown("---")
+
+    # --- Summary Statistics Table ---
+    st.subheader("Detailed Statistics")
+    stats = {
+        "Metric": [
+            "Starting Bankroll", "Simulation Period",
+            "Median Final", "Mean Final", "Std Dev",
+            "Min Final", "Max Final",
+            "5th Percentile", "25th Percentile", "75th Percentile", "95th Percentile",
+            "Median ROI", "Mean Trades/Sim", "Mean Skipped/Sim",
+            "Avg Win Rate", "Mean Max Drawdown",
+        ],
+        "Value": [
+            f"${bankroll:.2f}", f"{days} days",
+            f"${np.median(finals):.2f}", f"${np.mean(finals):.2f}", f"${np.std(finals):.2f}",
+            f"${np.min(finals):.2f}", f"${np.max(finals):.2f}",
+            f"${np.percentile(finals, 5):.2f}", f"${np.percentile(finals, 25):.2f}",
+            f"${np.percentile(finals, 75):.2f}", f"${np.percentile(finals, 95):.2f}",
+            f"{roi:+.1f}%", f"{np.mean(trades):.0f}", f"{np.mean(skipped):.0f}",
+            f"{avg_wr:.1f}%", f"{np.mean(max_dd)*100:.1f}%",
+        ]
+    }
+    if enable_harvest:
+        stats["Metric"].extend(["Median Harvested", "Mean Harvested", "Max Harvested"])
+        stats["Value"].extend([
+            f"${np.median(harvested):.2f}", f"${np.mean(harvested):.2f}", f"${np.max(harvested):.2f}",
+        ])
+    st.table(pd.DataFrame(stats))
+
 
 def render_architecture():
     st.title("🏛️ Architecture & Deployment")
