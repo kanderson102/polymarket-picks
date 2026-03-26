@@ -366,6 +366,27 @@ class PolymarketBot:
         if resolved_count > 0:
             logging.info(f"📊 Auto-resolved {resolved_count} trades this cycle")
 
+        # Expire stale trades: past end_date + 3 day grace, or >45 days old with no end_date
+        stale = self.db.get_stale_pending_trades(grace_days=3, max_age_days=45)
+        expired_count = 0
+        for trade in stale:
+            self.db.update_trade_result(trade['id'], 'EXPIRED')
+            expired_count += 1
+            bet = trade['bet_size'] if trade['bet_size'] > 0 else trade['entry_price']
+            end_info = f"end_date {trade['end_date']}" if trade['end_date'] else f"opened {trade['timestamp']}"
+            msg = "\n".join([
+                "⏰ TRADE EXPIRED",
+                "",
+                f"📋 {trade['market']}",
+                f"👤 {trade['specialist']}",
+                f"💵 ${bet:.2f} freed up ({end_info})",
+            ])
+            self.send_telegram_alert(msg)
+            logging.info(f"⏰ EXPIRED {trade['specialist']} | {trade['market']} | {end_info}")
+
+        if expired_count > 0:
+            logging.info(f"⏰ Expired {expired_count} stale trades this cycle")
+
     def check_order_book_depth(self, asset_id: str, bet_size: float) -> tuple[bool, float]:
         """Check if there's enough liquidity in the order book for our bet size."""
         try:

@@ -145,7 +145,7 @@ class TradingDB:
                 """
                 SELECT result 
                 FROM trades 
-                WHERE specialist = ? AND result != 'PENDING'
+                WHERE specialist = ? AND result IN ('WON', 'LOST')
                 ORDER BY timestamp DESC 
                 LIMIT ?
                 """,
@@ -316,6 +316,31 @@ class TradingDB:
                 seconds_ago = row[0]
                 return seconds_ago <= 120 # Alive if heartbeat was within 2 mins
             return False
+
+    def get_stale_pending_trades(self, grace_days: int = 3, max_age_days: int = 45) -> list[dict]:
+        """Fetch PENDING trades that are past their end_date + grace period,
+        or older than max_age_days with no end_date. These are candidates for expiration."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT id, specialist, market, entry_price, slug, outcome, bet_size, end_date, timestamp
+                FROM trades
+                WHERE result = 'PENDING' AND (
+                    (end_date != '' AND date(end_date, '+' || ? || ' days') < date('now'))
+                    OR
+                    (end_date = '' AND julianday('now') - julianday(timestamp) > ?)
+                )
+                ORDER BY timestamp ASC
+            """, (grace_days, max_age_days))
+            rows = cursor.fetchall()
+            return [
+                {
+                    "id": r[0], "specialist": r[1], "market": r[2],
+                    "entry_price": r[3], "slug": r[4], "outcome": r[5],
+                    "bet_size": r[6], "end_date": r[7], "timestamp": r[8],
+                }
+                for r in rows
+            ]
 
     def get_pending_trades_for_resolution(self) -> list[dict]:
         """Fetch all PENDING trades with their slugs and outcomes for resolution checking."""
