@@ -949,6 +949,7 @@ def render_historical_backtest(db):
                 last["trade_log"], last["equity_curve"], last["stats"],
                 last["bankroll"], last["final_balance"],
                 last["harvested_total"], last["lookback_days"], last["enable_harvest"],
+                last.get("pending_exposure", 0.0),
             )
             _render_save_view_hb(last)
         return
@@ -1000,6 +1001,7 @@ def render_historical_backtest(db):
     equity_curve = [(all_buys[0][0], balance)]
     trade_log = []
     seen_slugs = set()  # slug+outcome collision tracking
+    pending_exposure = 0.0  # Track capital locked in unresolved shares
     stats = {"copied": 0, "skipped_tag": 0, "skipped_price": 0, "skipped_buffer": 0, "skipped_collision": 0, "skipped_date": 0, "won": 0, "lost": 0, "pending": 0}
 
     for trade_dt, spec, act in all_buys:
@@ -1088,25 +1090,29 @@ def render_historical_backtest(db):
         seen_slugs.add(collision_key)
         stats["copied"] += 1
 
+        # Simulate real wallet: USDC leaves on buy, comes back on win
+        balance -= (bet_size + fee)  # Pay for shares + fee upfront
+
         if trade_result == "WON":
-            payout = (bet_size / price) - fee
-            pnl = payout - bet_size
-            balance += pnl
+            payout = bet_size / price  # Shares pay out $1 each
+            balance += payout
+            pnl = payout - bet_size - fee
             stats["won"] += 1
             action = "WON"
         elif trade_result == "LOST":
-            pnl = -(bet_size + fee)
-            balance += pnl
+            pnl = -(bet_size + fee)  # Already deducted above
             stats["lost"] += 1
             action = "LOST"
         else:
-            pnl = 0
+            # Capital is locked in shares — track it as unrealized value
+            pending_exposure += bet_size  # Shares still have value (at entry price)
+            pnl = -fee  # Only the fee is a definite loss so far
             stats["pending"] += 1
             action = "PENDING"
 
         balance = max(0.0, balance)
 
-        # Harvest
+        # Harvest checks against liquid balance only (not pending shares)
         if enable_harvest:
             result = FinanceController.check_harvest(balance, baseline)
             if result.triggered:
@@ -1114,7 +1120,8 @@ def render_historical_backtest(db):
                 balance = result.new_balance
                 baseline = result.new_baseline
 
-        equity_curve.append((trade_dt, balance + harvested_total))
+        # Equity = cash + pending shares value + harvested
+        equity_curve.append((trade_dt, balance + pending_exposure + harvested_total))
         trade_log.append({
             "Date": trade_dt, "Specialist": spec["name"], "Market": title,
             "Outcome": outcome, "Price": price,
@@ -1128,6 +1135,7 @@ def render_historical_backtest(db):
     hb_result_data = {
         "trade_log": trade_log, "equity_curve": equity_curve, "stats": stats,
         "bankroll": bankroll, "final_balance": balance,
+        "pending_exposure": pending_exposure,
         "harvested_total": harvested_total, "lookback_days": lookback_days,
         "enable_harvest": enable_harvest, "params": hb_params,
     }
@@ -1137,14 +1145,17 @@ def render_historical_backtest(db):
     _render_historical_results(
         trade_log, equity_curve, stats, bankroll, balance,
         harvested_total, lookback_days, enable_harvest,
+        pending_exposure,
     )
     _render_save_view_hb(hb_result_data)
 
 
 def _render_historical_results(trade_log, equity_curve, stats, bankroll, final_balance,
-                               harvested_total, lookback_days, enable_harvest):
+                               harvested_total, lookback_days, enable_harvest,
+                               pending_exposure=0.0):
     """Render the historical backtest results."""
-    total_value = final_balance + harvested_total
+    # Total value = cash + shares still open + harvested profits
+    total_value = final_balance + pending_exposure + harvested_total
     roi = ((total_value - bankroll) / bankroll) * 100
     total_resolved = stats["won"] + stats["lost"]
     win_rate = (stats["won"] / total_resolved * 100) if total_resolved > 0 else 0
@@ -1153,14 +1164,14 @@ def _render_historical_results(trade_log, equity_curve, stats, bankroll, final_b
     st.header("Results")
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Final Portfolio Value", f"${total_value:.2f}", f"{roi:+.1f}% ROI")
-    col2.metric("Remaining Balance", f"${final_balance:.2f}")
+    col2.metric("Cash Balance", f"${final_balance:.2f}")
     col3.metric("Trades Copied", stats["copied"])
     col4.metric("Win Rate", f"{win_rate:.0f}%" if total_resolved > 0 else "N/A")
 
     col5, col6, col7, col8 = st.columns(4)
     col5.metric("Won", stats["won"])
     col6.metric("Lost", stats["lost"])
-    col7.metric("Pending", stats["pending"])
+    col7.metric(f"Pending (${pending_exposure:.2f} in shares)", stats["pending"])
     if enable_harvest:
         col8.metric("Harvested", f"${harvested_total:.2f}")
     else:
@@ -1251,7 +1262,7 @@ def _render_save_view_hb(result_data):
             p = result_data.get("params", {})
             total_resolved = s["won"] + s["lost"]
             win_rate = (s["won"] / total_resolved * 100) if total_resolved > 0 else 0
-            total_value = result_data["final_balance"] + result_data["harvested_total"]
+            total_value = result_data["final_balance"] + result_data.get("pending_exposure", 0.0) + result_data["harvested_total"]
             roi = ((total_value - result_data["bankroll"]) / result_data["bankroll"]) * 100
             view = {
                 "name": view_name,
