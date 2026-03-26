@@ -11,30 +11,56 @@ class HarvestResult:
     new_balance: float
     profit: float
 
+MAX_POSITIONS_PER_SPECIALIST = 3
+
 class FinanceController:
     """
     Handles bankroll management, position sizing, and profit harvesting logic.
     """
-    
+
+    @staticmethod
+    def _get_base_percent(balance: float, tier: str) -> float:
+        """
+        Graduated base percentage that tapers as bankroll grows.
+        Keeps bets meaningful at $50, prevents oversized bets at $1000+.
+
+        SHARP:  $0-199 → 5%  |  $200-999 → 3%  |  $1000+ → 1.5%
+        WHALE:  $0-199 → 3%  |  $200-999 → 2%  |  $1000+ → 1%
+        """
+        if tier == 'SHARP':
+            if balance < 200:
+                return 0.05
+            elif balance < 1000:
+                return 0.03
+            else:
+                return 0.015
+        else:  # WHALE
+            if balance < 200:
+                return 0.03
+            elif balance < 1000:
+                return 0.02
+            else:
+                return 0.01
+
     @staticmethod
     def calculate_bet_size(current_balance: float, tier: str, win_rate: float) -> float:
         """
-        Dynamic Position Sizing.
-        Automatically scales portfolio capital towards sharp traders over time.
-        Whales get a lower base allocation (3%) to balance out their higher variance, 
-        but large enough to clear gas fees. Sharp traders get a standard allocation (5%).
-        
-        Phase 1-2 ($50 bankroll): 5% SHARP / 3% WHALE
-        Phase 3 ($1000+ bankroll): Scale down to 1-2% as bankroll grows.
+        Dynamic Position Sizing with graduated bankroll scaling.
+
+        Base percentages taper as the bankroll grows to keep position count
+        sustainable and avoid outsized single-trade risk:
+
+            SHARP:  $0-199 → 5%  |  $200-999 → 3%  |  $1000+ → 1.5%
+            WHALE:  $0-199 → 3%  |  $200-999 → 2%  |  $1000+ → 1%
+
+        Win rate multiplier still applies: (win_rate / 50.0).
         """
-        # Base capital percentage
-        # Phase 1-2: SHARP 5%, WHALE 3% (meaningful size on small bankroll)
-        base_percent = 0.05 if tier == 'SHARP' else 0.03
-        
+        base_percent = FinanceController._get_base_percent(current_balance, tier)
+
         # Scale the bet size dynamically by their historical win rate
         # A 75% win rate grinder will place 1.5x larger bets automatically
         win_rate_multiplier = (win_rate / 50.0) if win_rate > 0 else 1.0
-        
+
         return current_balance * base_percent * win_rate_multiplier
 
     @staticmethod

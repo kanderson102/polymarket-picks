@@ -1000,7 +1000,8 @@ def render_historical_backtest(db):
     equity_curve = [(all_buys[0][0], balance)]
     trade_log = []
     seen_slugs = set()  # slug+outcome collision tracking
-    stats = {"copied": 0, "skipped_tag": 0, "skipped_price": 0, "skipped_buffer": 0, "skipped_collision": 0, "skipped_date": 0, "won": 0, "lost": 0, "pending": 0}
+    spec_open_positions = {}  # specialist_name -> count of unresolved positions
+    stats = {"copied": 0, "skipped_tag": 0, "skipped_price": 0, "skipped_buffer": 0, "skipped_collision": 0, "skipped_date": 0, "skipped_cap": 0, "won": 0, "lost": 0, "pending": 0}
 
     for trade_dt, spec, act in all_buys:
         title = act.get("title", "Unknown")
@@ -1021,7 +1022,15 @@ def render_historical_backtest(db):
             trade_log.append({"Date": trade_dt, "Specialist": spec["name"], "Market": title, "Outcome": outcome, "Price": price, "Action": "SKIP: Collision", "P&L": 0, "Balance": balance})
             continue
 
-        # 2. Tag matching — use full event info with tag group expansion
+        # 2. Per-specialist position cap
+        from finance import MAX_POSITIONS_PER_SPECIALIST
+        open_for_spec = spec_open_positions.get(spec["name"], 0)
+        if open_for_spec >= MAX_POSITIONS_PER_SPECIALIST:
+            stats["skipped_cap"] += 1
+            trade_log.append({"Date": trade_dt, "Specialist": spec["name"], "Market": title, "Outcome": outcome, "Price": price, "Action": f"SKIP: {open_for_spec}/{MAX_POSITIONS_PER_SPECIALIST} positions", "P&L": 0, "Balance": balance})
+            continue
+
+        # 3. Tag matching — use full event info with tag group expansion
         event_info = _lookup_event_info(event_slug) if event_slug else {"tags": [], "end_date": "", "markets": []}
         market_tags = event_info["tags"]
         expanded_spec_tags = _expand_tags(spec["tags"])
@@ -1038,14 +1047,14 @@ def render_historical_backtest(db):
         if not market_tags:
             matched_tag = spec["tags"][0] if spec["tags"] else "1"
 
-        # 3. Value cap
+        # 4. Value cap
         max_price = FinanceController.get_max_price_for_tag(matched_tag)
         if price > max_price:
             stats["skipped_price"] += 1
             trade_log.append({"Date": trade_dt, "Specialist": spec["name"], "Market": title, "Outcome": outcome, "Price": price, "Action": f"SKIP: Price ${price:.2f} > cap ${max_price:.2f}", "P&L": 0, "Balance": balance})
             continue
 
-        # 4. Date filter — use end date from Gamma API
+        # 5. Date filter — use end date from Gamma API
         end_date_str = event_info.get("end_date", "")
         if end_date_str:
             try:
@@ -1061,13 +1070,13 @@ def render_historical_backtest(db):
             except ValueError:
                 pass
 
-        # 5. Buffer check
+        # 6. Buffer check
         if balance < min_buffer:
             stats["skipped_buffer"] += 1
             trade_log.append({"Date": trade_dt, "Specialist": spec["name"], "Market": title, "Outcome": outcome, "Price": price, "Action": "SKIP: Low balance", "P&L": 0, "Balance": balance})
             continue
 
-        # 6. Size the bet
+        # 7. Size the bet
         tier = spec.get("tier", "SHARP")
         win_rate = 50.0  # Use neutral for historical (no prior bot data)
         bet_size = FinanceController.calculate_bet_size(balance, tier, win_rate)
@@ -1087,6 +1096,7 @@ def render_historical_backtest(db):
 
         seen_slugs.add(collision_key)
         stats["copied"] += 1
+        spec_open_positions[spec["name"]] = spec_open_positions.get(spec["name"], 0) + 1
 
         if trade_result == "WON":
             payout = (bet_size / price) - fee
@@ -1094,11 +1104,13 @@ def render_historical_backtest(db):
             balance += pnl
             stats["won"] += 1
             action = "WON"
+            spec_open_positions[spec["name"]] -= 1
         elif trade_result == "LOST":
             pnl = -(bet_size + fee)
             balance += pnl
             stats["lost"] += 1
             action = "LOST"
+            spec_open_positions[spec["name"]] -= 1
         else:
             pnl = 0
             stats["pending"] += 1
@@ -1164,7 +1176,7 @@ def _render_historical_results(trade_log, equity_curve, stats, bankroll, final_b
     if enable_harvest:
         col8.metric("Harvested", f"${harvested_total:.2f}")
     else:
-        total_skipped = stats["skipped_tag"] + stats["skipped_price"] + stats["skipped_buffer"] + stats["skipped_collision"] + stats["skipped_date"]
+        total_skipped = stats["skipped_tag"] + stats["skipped_price"] + stats["skipped_buffer"] + stats["skipped_collision"] + stats["skipped_date"] + stats.get("skipped_cap", 0)
         col8.metric("Total Skipped", total_skipped)
 
     st.markdown("---")
@@ -1183,8 +1195,8 @@ def _render_historical_results(trade_log, equity_curve, stats, bankroll, final_b
     # --- Filter Breakdown ---
     st.subheader("Trade Filter Breakdown")
     filter_data = {
-        "Filter": ["Copied", "Tag Mismatch", "Price > Value Cap", "Date Too Far Out", "Collision (Duplicate)", "Low Balance"],
-        "Count": [stats["copied"], stats["skipped_tag"], stats["skipped_price"], stats["skipped_date"], stats["skipped_collision"], stats["skipped_buffer"]],
+        "Filter": ["Copied", "Tag Mismatch", "Price > Value Cap", "Date Too Far Out", "Collision (Duplicate)", "Position Cap", "Low Balance"],
+        "Count": [stats["copied"], stats["skipped_tag"], stats["skipped_price"], stats["skipped_date"], stats["skipped_collision"], stats.get("skipped_cap", 0), stats["skipped_buffer"]],
     }
     filter_df = pd.DataFrame(filter_data)
     col_chart, col_table = st.columns([2, 1])
@@ -1269,6 +1281,7 @@ def _render_save_view_hb(result_data):
                     "skipped_price": s["skipped_price"],
                     "skipped_date": s["skipped_date"],
                     "skipped_collision": s["skipped_collision"],
+                    "skipped_cap": s.get("skipped_cap", 0),
                     "harvested": result_data["harvested_total"],
                 },
             }
@@ -1307,6 +1320,7 @@ def _render_saved_hb_comparison():
             "Tag Skip": m["skipped_tag"],
             "Price Skip": m["skipped_price"],
             "Date Skip": m["skipped_date"],
+            "Cap Skip": m.get("skipped_cap", 0),
             "Harvested": f"${m['harvested']:.2f}",
         })
 

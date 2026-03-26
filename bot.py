@@ -575,7 +575,13 @@ class PolymarketBot:
                 if t[1] == market_name:
                     return "PERMANENT_REJECT", f"Already holding an active position in {market_name}", 0.0
 
-        # 1. Health Monitor Check
+        # 1. Per-specialist position cap
+        from finance import MAX_POSITIONS_PER_SPECIALIST
+        open_count = self.db.get_specialist_pending_count(specialist.name)
+        if open_count >= MAX_POSITIONS_PER_SPECIALIST:
+            return "PERMANENT_REJECT", f"Already holding {open_count}/{MAX_POSITIONS_PER_SPECIALIST} positions for {specialist.name}", 0.0
+
+        # 2. Health Monitor Check
         win_rate = self.db.get_specialist_win_rate(specialist.name)
         
         # WHALE threshold is 40.0%, SHARP threshold is 55.0%
@@ -584,23 +590,21 @@ class PolymarketBot:
         if win_rate < min_win_rate:
             return "PERMANENT_REJECT", f"Probation (Win Rate {win_rate}% < {min_win_rate}%)", 0.0
             
-        # 2. Correct Tag ID Mapping Check
+        # 3. Correct Tag ID Mapping Check
         if str(market_tag) not in specialist.target_tags:
             tag_name = TAG_MAP.get(str(market_tag), market_tag)
             return "PERMANENT_REJECT", f"{tag_name} outside domain", 0.0
 
-        # 3. Adaptive Value Caps
+        # 4. Adaptive Value Caps
         max_entry = FinanceController.get_max_price_for_tag(market_tag)
         if current_price > max_entry:
             return "TEMPORARY_REJECT", f"Current Price {current_price} exceeds Value Cap {max_entry}", 0.0
 
-        # 4. No Chase / Slippage Check
-        # leader_price = specialist's entry price (avgPrice)
-        # current_price = current best ask on the order book
+        # 5. No Chase / Slippage Check
         if not FinanceController.is_slippage_acceptable(leader_price, current_price):
             return "TEMPORARY_REJECT", f"Price slipped to ${current_price:.3f} vs specialist's ${leader_price:.3f} (>{2.5}% gap)", 0.0
 
-        # 5. Position Sizing — use real wallet balance
+        # 6. Position Sizing — use real wallet balance
         wallet_balance = get_wallet_balance()
         current_available = max(0.0, wallet_balance - self.db.get_total_pending_exposure())
         

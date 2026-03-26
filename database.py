@@ -286,6 +286,13 @@ class TradingDB:
             cursor.execute("UPDATE specialists SET is_active = ? WHERE name = ?", (int(is_active), name))
             conn.commit()
             
+    def get_specialist_pending_count(self, specialist: str) -> int:
+        """Count how many PENDING trades a specialist currently has open."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM trades WHERE specialist = ? AND result = 'PENDING'", (specialist,))
+            return cursor.fetchone()[0]
+
     def get_total_pending_exposure(self) -> float:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
