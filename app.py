@@ -2,11 +2,16 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import os
+import requests
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from database import TradingDB
 from finance import FinanceController
 
 load_dotenv()
+
+DATA_API_URL = "https://data-api.polymarket.com"
+GAMMA_API_URL = "https://gamma-api.polymarket.com"
 
 TAG_MAP = {
     "100381": "NBA",
@@ -31,12 +36,14 @@ def main():
     db = TradingDB()
 
     st.sidebar.title("Navigation")
-    page = st.sidebar.radio("Go to", ["Dashboard", "Backtest Simulator", "Strategy & SOP", "Architecture & Deployment", "Logs"])
+    page = st.sidebar.radio("Go to", ["Dashboard", "Backtest Simulator", "Historical Backtest", "Strategy & SOP", "Architecture & Deployment", "Logs"])
 
     if page == "Dashboard":
         render_dashboard(db)
     elif page == "Backtest Simulator":
         render_backtest(db)
+    elif page == "Historical Backtest":
+        render_historical_backtest(db)
     elif page == "Strategy & SOP":
         render_strategy()
     elif page == "Architecture & Deployment":
@@ -599,6 +606,369 @@ def _render_backtest_results(results, bankroll, days, enable_harvest):
             f"${np.median(harvested):.2f}", f"${np.mean(harvested):.2f}", f"${np.max(harvested):.2f}",
         ])
     st.table(pd.DataFrame(stats))
+
+
+SPORTS_TAGS = {"100381", "100382", "100383", "100384", "100401", "100101", "100102"}
+MAX_DAYS_SPORTS = 30
+MAX_DAYS_DEFAULT = 14
+
+
+def _fetch_specialist_activity(wallet: str, limit: int = 200) -> list[dict]:
+    """Fetch trade activity for a specialist from Polymarket Data API."""
+    all_activity = []
+    offset = 0
+    batch = 50
+    while offset < limit:
+        try:
+            resp = requests.get(
+                f"{DATA_API_URL}/activity",
+                params={"user": wallet, "limit": min(batch, limit - offset), "offset": offset},
+                timeout=10,
+            )
+            if resp.status_code != 200:
+                break
+            data = resp.json()
+            if not data:
+                break
+            all_activity.extend(data)
+            if len(data) < batch:
+                break
+            offset += batch
+        except Exception:
+            break
+    return all_activity
+
+
+def _lookup_event_tags(event_slug: str) -> list[str]:
+    """Look up market tags from Gamma API (cached in session state)."""
+    cache_key = f"_tag_cache_{event_slug}"
+    if cache_key in st.session_state:
+        return st.session_state[cache_key]
+    try:
+        resp = requests.get(f"{GAMMA_API_URL}/events?slug={event_slug}", timeout=5)
+        if resp.status_code == 200:
+            events = resp.json()
+            if events:
+                tags = []
+                for tag in events[0].get("tags", []):
+                    tag_id = str(tag.get("id", "")) if isinstance(tag, dict) else str(tag)
+                    if tag_id:
+                        tags.append(tag_id)
+                st.session_state[cache_key] = tags
+                return tags
+    except Exception:
+        pass
+    st.session_state[cache_key] = []
+    return []
+
+
+def render_historical_backtest(db):
+    st.title("📜 Historical Backtest")
+    st.markdown("Replay your specialists' **real Polymarket trades** through the bot's strategy rules to see what it would have copied and the resulting P&L.")
+
+    # --- Controls ---
+    st.sidebar.markdown("---")
+    st.sidebar.header("Historical Backtest")
+    bankroll = st.sidebar.number_input("Starting Bankroll ($)", min_value=10.0, max_value=100000.0, value=50.0, step=10.0, key="hb_bankroll")
+    max_trades_per_spec = st.sidebar.slider("Max Trades to Fetch (per specialist)", 50, 500, 200, step=50, key="hb_limit")
+    lookback_days = st.sidebar.slider("Lookback Window (days)", 7, 180, 60, key="hb_lookback")
+    enable_harvest = st.sidebar.checkbox("Enable 2x Harvest Rule", value=True, key="hb_harvest")
+    min_buffer = st.sidebar.number_input("Min Buffer ($)", min_value=1.0, max_value=50.0, value=5.0, step=1.0, key="hb_buffer")
+
+    specialists = db.get_all_specialists()
+    active_specs = [s for s in specialists if s.get("is_active", True) and "MOCK" not in s["wallet"]]
+
+    if not active_specs:
+        st.warning("No active specialists with real wallets found.")
+        return
+
+    spec_names = [s["name"] for s in active_specs]
+    selected = st.sidebar.multiselect("Specialists to Include", spec_names, default=spec_names, key="hb_specs")
+
+    if not st.button("Run Historical Backtest", type="primary", key="hb_run"):
+        st.info("Configure parameters in the sidebar and click **Run Historical Backtest** to begin.")
+        return
+
+    selected_specs = [s for s in active_specs if s["name"] in selected]
+    if not selected_specs:
+        st.error("Select at least one specialist.")
+        return
+
+    # --- Fetch Activity ---
+    cutoff = datetime.utcnow() - timedelta(days=lookback_days)
+    progress = st.progress(0, text="Fetching specialist trade history...")
+    all_buys = []  # (timestamp, specialist_dict, trade_dict)
+    redeemed_conditions = {}  # conditionId -> True (specialist redeemed = WON)
+
+    for i, spec in enumerate(selected_specs):
+        progress.progress((i) / len(selected_specs), text=f"Fetching {spec['name']}...")
+        activity = _fetch_specialist_activity(spec["wallet"], limit=max_trades_per_spec)
+
+        for act in activity:
+            ts = act.get("timestamp", 0)
+            if isinstance(ts, str):
+                try:
+                    trade_dt = datetime.fromisoformat(ts.replace("Z", "+00:00")).replace(tzinfo=None)
+                except Exception:
+                    continue
+            else:
+                trade_dt = datetime.utcfromtimestamp(ts / 1000 if ts > 1e12 else ts)
+
+            if trade_dt < cutoff:
+                continue
+
+            act_type = act.get("type", "")
+            condition_id = act.get("conditionId", "")
+
+            if act_type == "REDEEM" and condition_id:
+                redeemed_conditions[condition_id] = True
+
+            if act_type == "TRADE" and act.get("side") == "BUY":
+                all_buys.append((trade_dt, spec, act))
+
+    progress.progress(1.0, text="Processing trades...")
+
+    if not all_buys:
+        progress.empty()
+        st.warning(f"No BUY trades found in the last {lookback_days} days for selected specialists.")
+        return
+
+    # Sort chronologically
+    all_buys.sort(key=lambda x: x[0])
+
+    # --- Simulate ---
+    balance = bankroll
+    baseline = bankroll
+    harvested_total = 0.0
+    equity_curve = [(all_buys[0][0], balance)]
+    trade_log = []
+    seen_slugs = set()  # slug+outcome collision tracking
+    stats = {"copied": 0, "skipped_tag": 0, "skipped_price": 0, "skipped_buffer": 0, "skipped_collision": 0, "skipped_date": 0, "won": 0, "lost": 0, "pending": 0}
+
+    for trade_dt, spec, act in all_buys:
+        title = act.get("title", "Unknown")
+        event_slug = act.get("eventSlug", act.get("slug", ""))
+        outcome = act.get("outcome", "Yes")
+        price = float(act.get("price", 0))
+        asset = act.get("asset", "")
+
+        if price <= 0:
+            continue
+
+        # --- Apply Strategy Filters ---
+
+        # 1. Collision check
+        collision_key = f"{event_slug}:{outcome}"
+        if collision_key in seen_slugs:
+            stats["skipped_collision"] += 1
+            trade_log.append({"Date": trade_dt, "Specialist": spec["name"], "Market": title, "Outcome": outcome, "Price": price, "Action": "SKIP: Collision", "P&L": 0, "Balance": balance})
+            continue
+
+        # 2. Tag matching
+        market_tags = _lookup_event_tags(event_slug) if event_slug else []
+        matched_tag = None
+        for tag in market_tags:
+            if tag in spec["tags"]:
+                matched_tag = tag
+                break
+        if market_tags and matched_tag is None:
+            stats["skipped_tag"] += 1
+            trade_log.append({"Date": trade_dt, "Specialist": spec["name"], "Market": title, "Outcome": outcome, "Price": price, "Action": "SKIP: Tag mismatch", "P&L": 0, "Balance": balance})
+            continue
+        if not market_tags:
+            matched_tag = spec["tags"][0] if spec["tags"] else "100381"
+
+        # 3. Value cap
+        max_price = FinanceController.get_max_price_for_tag(matched_tag)
+        if price > max_price:
+            stats["skipped_price"] += 1
+            trade_log.append({"Date": trade_dt, "Specialist": spec["name"], "Market": title, "Outcome": outcome, "Price": price, "Action": f"SKIP: Price ${price:.2f} > cap ${max_price:.2f}", "P&L": 0, "Balance": balance})
+            continue
+
+        # 4. Date filter
+        end_date_str = act.get("endDate", "")
+        if end_date_str:
+            try:
+                end_dt = datetime.strptime(end_date_str.split("T")[0], "%Y-%m-%d")
+                days_out = (end_dt - trade_dt).days
+                max_days = MAX_DAYS_SPORTS if any(t in SPORTS_TAGS for t in market_tags) else MAX_DAYS_DEFAULT
+                if days_out > max_days:
+                    stats["skipped_date"] += 1
+                    trade_log.append({"Date": trade_dt, "Specialist": spec["name"], "Market": title, "Outcome": outcome, "Price": price, "Action": f"SKIP: {days_out}d out > {max_days}d", "P&L": 0, "Balance": balance})
+                    continue
+            except ValueError:
+                pass
+
+        # 5. Buffer check
+        if balance < min_buffer:
+            stats["skipped_buffer"] += 1
+            trade_log.append({"Date": trade_dt, "Specialist": spec["name"], "Market": title, "Outcome": outcome, "Price": price, "Action": "SKIP: Low balance", "P&L": 0, "Balance": balance})
+            continue
+
+        # 6. Size the bet
+        tier = spec.get("tier", "SHARP")
+        win_rate = 50.0  # Use neutral for historical (no prior bot data)
+        bet_size = FinanceController.calculate_bet_size(balance, tier, win_rate)
+        available = balance - min_buffer
+        if bet_size > available:
+            bet_size = available
+        if bet_size <= 0:
+            stats["skipped_buffer"] += 1
+            continue
+
+        # Fee
+        fee = bet_size * FinanceController.estimate_taker_fee(price, matched_tag)
+
+        # Determine outcome from redemption data (conditionId is the reliable join key)
+        condition_id = act.get("conditionId", "")
+        was_redeemed = redeemed_conditions.get(condition_id, False)
+
+        seen_slugs.add(collision_key)
+        stats["copied"] += 1
+
+        if was_redeemed:
+            payout = (bet_size / price) - fee
+            pnl = payout - bet_size
+            balance += pnl
+            stats["won"] += 1
+            action = "WON"
+        else:
+            # If the specialist has a REDEEM for different conditionId on the same
+            # event, their other outcome won — meaning ours lost. If no REDEEM
+            # exists at all for this event, and enough time has passed, assume lost.
+            # For recent trades (< 7 days old), mark as PENDING.
+            days_since = (datetime.utcnow() - trade_dt).days
+            if days_since > 7:
+                pnl = -(bet_size + fee)
+                balance += pnl
+                stats["lost"] += 1
+                action = "LOST"
+            else:
+                pnl = 0
+                stats["pending"] += 1
+                action = "PENDING"
+
+        balance = max(0.0, balance)
+
+        # Harvest
+        if enable_harvest:
+            result = FinanceController.check_harvest(balance, baseline)
+            if result.triggered:
+                harvested_total += result.transfer_amount
+                balance = result.new_balance
+                baseline = result.new_baseline
+
+        equity_curve.append((trade_dt, balance + harvested_total))
+        trade_log.append({
+            "Date": trade_dt, "Specialist": spec["name"], "Market": title,
+            "Outcome": outcome, "Price": price,
+            "Action": f"COPIED → {action}", "Bet": bet_size,
+            "P&L": pnl, "Balance": balance,
+        })
+
+    progress.empty()
+
+    # --- Render Results ---
+    _render_historical_results(
+        trade_log, equity_curve, stats, bankroll, balance,
+        harvested_total, lookback_days, enable_harvest,
+    )
+
+
+def _render_historical_results(trade_log, equity_curve, stats, bankroll, final_balance,
+                               harvested_total, lookback_days, enable_harvest):
+    """Render the historical backtest results."""
+    total_value = final_balance + harvested_total
+    roi = ((total_value - bankroll) / bankroll) * 100
+    total_resolved = stats["won"] + stats["lost"]
+    win_rate = (stats["won"] / total_resolved * 100) if total_resolved > 0 else 0
+
+    # --- Headline Metrics ---
+    st.header("Results")
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("Final Portfolio Value", f"${total_value:.2f}", f"{roi:+.1f}% ROI")
+    col2.metric("Remaining Balance", f"${final_balance:.2f}")
+    col3.metric("Trades Copied", stats["copied"])
+    col4.metric("Win Rate", f"{win_rate:.0f}%" if total_resolved > 0 else "N/A")
+
+    col5, col6, col7, col8 = st.columns(4)
+    col5.metric("Won", stats["won"])
+    col6.metric("Lost", stats["lost"])
+    col7.metric("Pending", stats["pending"])
+    if enable_harvest:
+        col8.metric("Harvested", f"${harvested_total:.2f}")
+    else:
+        total_skipped = stats["skipped_tag"] + stats["skipped_price"] + stats["skipped_buffer"] + stats["skipped_collision"] + stats["skipped_date"]
+        col8.metric("Total Skipped", total_skipped)
+
+    st.markdown("---")
+
+    # --- Equity Curve ---
+    st.subheader("Portfolio Equity Curve")
+    if len(equity_curve) > 1:
+        eq_df = pd.DataFrame(equity_curve, columns=["Date", "Portfolio Value ($)"])
+        eq_df = eq_df.set_index("Date")
+        st.line_chart(eq_df)
+    else:
+        st.info("Not enough data points for an equity curve.")
+
+    st.markdown("---")
+
+    # --- Filter Breakdown ---
+    st.subheader("Trade Filter Breakdown")
+    filter_data = {
+        "Filter": ["Copied", "Tag Mismatch", "Price > Value Cap", "Date Too Far Out", "Collision (Duplicate)", "Low Balance"],
+        "Count": [stats["copied"], stats["skipped_tag"], stats["skipped_price"], stats["skipped_date"], stats["skipped_collision"], stats["skipped_buffer"]],
+    }
+    filter_df = pd.DataFrame(filter_data)
+    col_chart, col_table = st.columns([2, 1])
+    with col_chart:
+        st.bar_chart(filter_df.set_index("Filter"))
+    with col_table:
+        st.table(filter_df)
+
+    st.markdown("---")
+
+    # --- Per-Specialist Breakdown ---
+    st.subheader("Per-Specialist Performance")
+    if trade_log:
+        log_df = pd.DataFrame(trade_log)
+        copied = log_df[log_df["Action"].str.startswith("COPIED")]
+        if not copied.empty:
+            spec_stats = []
+            for name, group in copied.groupby("Specialist"):
+                wins = (group["Action"] == "COPIED → WON").sum()
+                losses = (group["Action"] == "COPIED → LOST").sum()
+                pending = (group["Action"] == "COPIED → PENDING").sum()
+                total_pnl = group["P&L"].sum()
+                resolved = wins + losses
+                wr = (wins / resolved * 100) if resolved > 0 else 0
+                spec_stats.append({
+                    "Specialist": name, "Copied": len(group),
+                    "Won": wins, "Lost": losses, "Pending": pending,
+                    "Win Rate": f"{wr:.0f}%", "P&L": f"${total_pnl:+.2f}",
+                })
+            st.table(pd.DataFrame(spec_stats))
+        else:
+            st.info("No trades were copied.")
+
+    st.markdown("---")
+
+    # --- Full Trade Log ---
+    st.subheader("Full Trade Log")
+    if trade_log:
+        log_df = pd.DataFrame(trade_log)
+        log_df["Date"] = pd.to_datetime(log_df["Date"]).dt.strftime("%Y-%m-%d %H:%M")
+        log_df["Price"] = log_df["Price"].apply(lambda x: f"${x:.3f}")
+        if "Bet" in log_df.columns:
+            log_df["Bet"] = log_df["Bet"].apply(lambda x: f"${x:.2f}" if pd.notna(x) and x > 0 else "—")
+        log_df["P&L"] = log_df["P&L"].apply(lambda x: f"${x:+.2f}" if x != 0 else "—")
+        log_df["Balance"] = log_df["Balance"].apply(lambda x: f"${x:.2f}")
+
+        # Color-code actions
+        st.dataframe(log_df, use_container_width=True, hide_index=True, height=500)
+    else:
+        st.info("No trades to display.")
 
 
 def render_architecture():
