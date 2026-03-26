@@ -253,17 +253,15 @@ class PolymarketBot:
             logging.error(f"Failed to send Telegram alert: {e}")
 
     def generate_hourly_summary(self):
-        exposure = self.db.get_total_pending_exposure()
         wallet_balance = get_wallet_balance()
-        available = max(0.0, wallet_balance - exposure)
-        
+
         recent = self.db.get_all_recent_trades(limit=500)
         wins = sum(1 for t in recent if t[4] == 'WON')
         losses = sum(1 for t in recent if t[4] == 'LOST')
         pending = sum(1 for t in recent if t[4] == 'PENDING')
         total_resolved = wins + losses
         win_pct = f"{(wins/total_resolved*100):.0f}%" if total_resolved > 0 else "N/A"
-        
+
         # Calculate P&L and Slippage from recent trades
         total_pnl = 0.0
         slippages = []
@@ -277,20 +275,19 @@ class PolymarketBot:
             elif t[4] == 'LOST':
                 bet_size = t[7] if t[7] and t[7] > 0 else t[2]
                 total_pnl -= bet_size
-            
+
             # Slippage (t[9]=leader_price, t[10]=market_price)
             if len(t) > 10 and t[9] > 0 and t[10] > 0:
                 slippages.append(FinanceController.calculate_slippage_pct(t[9], t[10]))
-        
+
         avg_slippage = sum(slippages) / len(slippages) if slippages else 0.0
         ws_status = "🟢 WS" if (self.ws_listener and self.ws_listener.is_connected) else "🔴 WS"
-        
+
         lines = [
             "📊 Hourly Summary",
             "",
             f"💰 Wallet: ${wallet_balance:.2f} USDC",
-            f"📈 Exposure: ${exposure:.2f} across {pending} pending",
-            f"💵 Available: ${available:.2f}",
+            f"🎯 Open Positions: {pending}",
             f"💵 Realized P&L: ${total_pnl:+.2f}",
             f"📉 Avg Slippage: {avg_slippage:+.2f}%",
             "",
@@ -531,7 +528,7 @@ class PolymarketBot:
                                         self.db.add_trade(spec.name, market, current_market_price, slug, outcome, bet_size, endDate_str, price, current_market_price)
                                         
                                         wallet_bal = get_wallet_balance()
-                                        remaining = max(0.0, wallet_bal - self.db.get_total_pending_exposure())
+                                        remaining = wallet_bal  # Wallet already reflects spent USDC
                                         est_fee = FinanceController.estimate_taker_fee(current_market_price, matched_tag) * bet_size
                                         slippage = FinanceController.calculate_slippage_pct(price, current_market_price)
                                         
@@ -596,13 +593,7 @@ class PolymarketBot:
                 if t[1] == market_name:
                     return "PERMANENT_REJECT", f"Already holding an active position in {market_name}", 0.0
 
-        # 1. Per-specialist position cap
-        from finance import MAX_POSITIONS_PER_SPECIALIST
-        open_count = self.db.get_specialist_pending_count(specialist.name)
-        if open_count >= MAX_POSITIONS_PER_SPECIALIST:
-            return "PERMANENT_REJECT", f"Already holding {open_count}/{MAX_POSITIONS_PER_SPECIALIST} positions for {specialist.name}", 0.0
-
-        # 2. Health Monitor Check
+        # 1. Health Monitor Check
         win_rate = self.db.get_specialist_win_rate(specialist.name)
         
         # WHALE threshold is 40.0%, SHARP threshold is 55.0%
@@ -611,31 +602,30 @@ class PolymarketBot:
         if win_rate < min_win_rate:
             return "PERMANENT_REJECT", f"Probation (Win Rate {win_rate}% < {min_win_rate}%)", 0.0
             
-        # 3. Correct Tag ID Mapping Check
+        # 2. Correct Tag ID Mapping Check
         if str(market_tag) not in specialist.target_tags:
             tag_name = TAG_MAP.get(str(market_tag), market_tag)
             return "PERMANENT_REJECT", f"{tag_name} outside domain", 0.0
 
-        # 4. Adaptive Value Caps
+        # 3. Adaptive Value Caps
         max_entry = FinanceController.get_max_price_for_tag(market_tag)
         if current_price > max_entry:
             return "TEMPORARY_REJECT", f"Current Price {current_price} exceeds Value Cap {max_entry}", 0.0
 
-        # 5. No Chase / Slippage Check
+        # 4. No Chase / Slippage Check
         if not FinanceController.is_slippage_acceptable(leader_price, current_price):
             return "TEMPORARY_REJECT", f"Price slipped to ${current_price:.3f} vs specialist's ${leader_price:.3f} (>{2.5}% gap)", 0.0
 
-        # 6. Position Sizing — use real wallet balance
+        # 5. Position Sizing — wallet balance IS the available capital
+        # (USDC leaves wallet on buy, so no need to subtract pending exposure)
         wallet_balance = get_wallet_balance()
-        current_available = max(0.0, wallet_balance - self.db.get_total_pending_exposure())
-        
-        if current_available < 5.0:
-            return "TEMPORARY_REJECT", f"Insufficient Buffer (${current_available:.2f} available, $5.00 minimum)", 0.0
-            
-        # Calculate bet size using actual wallet balance for dynamic scaling
+
+        if wallet_balance < 5.0:
+            return "TEMPORARY_REJECT", f"Insufficient Balance (${wallet_balance:.2f} USDC, $5.00 minimum)", 0.0
+
         bet_size = FinanceController.calculate_bet_size(wallet_balance, specialist.tier, win_rate)
-        if bet_size > current_available:
-            bet_size = current_available
+        if bet_size > wallet_balance - 5.0:
+            bet_size = wallet_balance - 5.0  # Preserve $5 buffer
 
         return "PASSED", f"Validated for ${bet_size:.2f} bet", float(bet_size)
 

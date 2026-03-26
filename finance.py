@@ -11,8 +11,6 @@ class HarvestResult:
     new_balance: float
     profit: float
 
-MAX_POSITIONS_PER_SPECIALIST = 3
-
 class FinanceController:
     """
     Handles bankroll management, position sizing, and profit harvesting logic.
