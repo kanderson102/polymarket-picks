@@ -14,16 +14,23 @@ DATA_API_URL = "https://data-api.polymarket.com"
 GAMMA_API_URL = "https://gamma-api.polymarket.com"
 
 TAG_MAP = {
-    "100381": "NBA",
-    "100382": "NCAAM",
-    "100101": "Soccer",
-    "100102": "UCL",
-    "100383": "MLB",
-    "100384": "NHL",
-    "100401": "Tennis",
-    "100601": "Tech",
-    "100701": "Politics",
-    "100801": "Pop Culture"
+    "745": "NBA",
+    "28": "Basketball",
+    "100350": "Soccer",
+    "100977": "UCL",
+    "306": "EPL",
+    "82": "Premier League",
+    "100381": "MLB",
+    "678": "baseball",
+    "899": "NHL",
+    "100088": "Hockey",
+    "100089": "Stanley Cup",
+    "64": "Esports",
+    "2": "Politics",
+    "144": "Elections",
+    "100265": "Geopolitics",
+    "1": "Sports",
+    "100639": "Games",
 }
 
 def get_human_readable_tags(tags):
@@ -608,7 +615,7 @@ def _render_backtest_results(results, bankroll, days, enable_harvest):
     st.table(pd.DataFrame(stats))
 
 
-SPORTS_TAGS = {"100381", "100382", "100383", "100384", "100401", "100101", "100102"}
+SPORTS_TAGS = {"745", "28", "100350", "100977", "306", "82", "100381", "678", "899", "100088", "100089", "1", "100639", "64", "102366"}
 MAX_DAYS_SPORTS = 30
 MAX_DAYS_DEFAULT = 14
 
@@ -639,27 +646,43 @@ def _fetch_specialist_activity(wallet: str, limit: int = 200) -> list[dict]:
     return all_activity
 
 
-def _lookup_event_tags(event_slug: str) -> list[str]:
-    """Look up market tags from Gamma API (cached in session state)."""
-    cache_key = f"_tag_cache_{event_slug}"
+def _lookup_event_info(event_slug: str) -> dict:
+    """Look up market tags and end date from Gamma API (cached in session state).
+    Returns {"tags": [...], "end_date": "YYYY-MM-DD" or ""}."""
+    cache_key = f"_event_info_{event_slug}"
     if cache_key in st.session_state:
         return st.session_state[cache_key]
+    result = {"tags": [], "end_date": ""}
     try:
         resp = requests.get(f"{GAMMA_API_URL}/events?slug={event_slug}", timeout=5)
         if resp.status_code == 200:
             events = resp.json()
             if events:
-                tags = []
-                for tag in events[0].get("tags", []):
+                event = events[0]
+                for tag in event.get("tags", []):
                     tag_id = str(tag.get("id", "")) if isinstance(tag, dict) else str(tag)
                     if tag_id:
-                        tags.append(tag_id)
-                st.session_state[cache_key] = tags
-                return tags
+                        result["tags"].append(tag_id)
+                # Get end date from the first market in the event
+                markets = event.get("markets", [])
+                if markets:
+                    end = markets[0].get("endDate", "") or markets[0].get("end_date_iso", "")
+                    if end:
+                        result["end_date"] = end.split("T")[0] if "T" in end else end
+                # Fallback to event-level endDate
+                if not result["end_date"]:
+                    end = event.get("endDate", "") or event.get("end_date_iso", "")
+                    if end:
+                        result["end_date"] = end.split("T")[0] if "T" in end else end
     except Exception:
         pass
-    st.session_state[cache_key] = []
-    return []
+    st.session_state[cache_key] = result
+    return result
+
+
+def _lookup_event_tags(event_slug: str) -> list[str]:
+    """Convenience wrapper returning just tags."""
+    return _lookup_event_info(event_slug).get("tags", [])
 
 
 def render_historical_backtest(db):
@@ -674,6 +697,10 @@ def render_historical_backtest(db):
     lookback_days = st.sidebar.slider("Lookback Window (days)", 7, 180, 60, key="hb_lookback")
     enable_harvest = st.sidebar.checkbox("Enable 2x Harvest Rule", value=True, key="hb_harvest")
     min_buffer = st.sidebar.number_input("Min Buffer ($)", min_value=1.0, max_value=50.0, value=5.0, step=1.0, key="hb_buffer")
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Date Filter")
+    max_days_sports = st.sidebar.slider("Max Days Out (Sports)", 7, 90, 30, key="hb_max_days_sports")
+    max_days_other = st.sidebar.slider("Max Days Out (Non-Sports)", 7, 90, 14, key="hb_max_days_other")
 
     specialists = db.get_all_specialists()
     active_specs = [s for s in specialists if s.get("is_active", True) and "MOCK" not in s["wallet"]]
@@ -764,19 +791,21 @@ def render_historical_backtest(db):
             trade_log.append({"Date": trade_dt, "Specialist": spec["name"], "Market": title, "Outcome": outcome, "Price": price, "Action": "SKIP: Collision", "P&L": 0, "Balance": balance})
             continue
 
-        # 2. Tag matching
-        market_tags = _lookup_event_tags(event_slug) if event_slug else []
+        # 2. Tag matching — use full event info (tags + end date)
+        event_info = _lookup_event_info(event_slug) if event_slug else {"tags": [], "end_date": ""}
+        market_tags = event_info["tags"]
         matched_tag = None
         for tag in market_tags:
             if tag in spec["tags"]:
                 matched_tag = tag
                 break
         if market_tags and matched_tag is None:
+            tag_names = [TAG_MAP.get(t, t) for t in market_tags[:3]]
             stats["skipped_tag"] += 1
-            trade_log.append({"Date": trade_dt, "Specialist": spec["name"], "Market": title, "Outcome": outcome, "Price": price, "Action": "SKIP: Tag mismatch", "P&L": 0, "Balance": balance})
+            trade_log.append({"Date": trade_dt, "Specialist": spec["name"], "Market": title, "Outcome": outcome, "Price": price, "Action": f"SKIP: Tag mismatch ({', '.join(tag_names)})", "P&L": 0, "Balance": balance})
             continue
         if not market_tags:
-            matched_tag = spec["tags"][0] if spec["tags"] else "100381"
+            matched_tag = spec["tags"][0] if spec["tags"] else "1"
 
         # 3. Value cap
         max_price = FinanceController.get_max_price_for_tag(matched_tag)
@@ -785,16 +814,18 @@ def render_historical_backtest(db):
             trade_log.append({"Date": trade_dt, "Specialist": spec["name"], "Market": title, "Outcome": outcome, "Price": price, "Action": f"SKIP: Price ${price:.2f} > cap ${max_price:.2f}", "P&L": 0, "Balance": balance})
             continue
 
-        # 4. Date filter
-        end_date_str = act.get("endDate", "")
+        # 4. Date filter — use end date from Gamma API
+        end_date_str = event_info.get("end_date", "")
         if end_date_str:
             try:
-                end_dt = datetime.strptime(end_date_str.split("T")[0], "%Y-%m-%d")
+                end_dt = datetime.strptime(end_date_str, "%Y-%m-%d")
                 days_out = (end_dt - trade_dt).days
-                max_days = MAX_DAYS_SPORTS if any(t in SPORTS_TAGS for t in market_tags) else MAX_DAYS_DEFAULT
+                is_sports = any(t in SPORTS_TAGS for t in market_tags)
+                max_days = max_days_sports if is_sports else max_days_other
                 if days_out > max_days:
                     stats["skipped_date"] += 1
-                    trade_log.append({"Date": trade_dt, "Specialist": spec["name"], "Market": title, "Outcome": outcome, "Price": price, "Action": f"SKIP: {days_out}d out > {max_days}d", "P&L": 0, "Balance": balance})
+                    cat = "Sports" if is_sports else "Other"
+                    trade_log.append({"Date": trade_dt, "Specialist": spec["name"], "Market": title, "Outcome": outcome, "Price": price, "Action": f"SKIP: {days_out}d out > {max_days}d ({cat})", "P&L": 0, "Balance": balance})
                     continue
             except ValueError:
                 pass
@@ -833,12 +864,19 @@ def render_historical_backtest(db):
             stats["won"] += 1
             action = "WON"
         else:
-            # If the specialist has a REDEEM for different conditionId on the same
-            # event, their other outcome won — meaning ours lost. If no REDEEM
-            # exists at all for this event, and enough time has passed, assume lost.
-            # For recent trades (< 7 days old), mark as PENDING.
-            days_since = (datetime.utcnow() - trade_dt).days
-            if days_since > 7:
+            # Determine if market has ended using Gamma end date or trade age
+            market_ended = False
+            if end_date_str:
+                try:
+                    end_dt = datetime.strptime(end_date_str, "%Y-%m-%d")
+                    market_ended = end_dt < datetime.utcnow()
+                except ValueError:
+                    pass
+            if not market_ended:
+                # Fallback: if trade is > 7 days old and no redeem, likely lost
+                market_ended = (datetime.utcnow() - trade_dt).days > 7
+
+            if market_ended:
                 pnl = -(bet_size + fee)
                 balance += pnl
                 stats["lost"] += 1

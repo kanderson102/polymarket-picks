@@ -38,12 +38,15 @@ def run_tests():
 
     # 4. Test Adaptive Value Caps
     print("\n--- Testing Adaptive Value Caps ---")
-    nba_cap = FinanceController.get_max_price_for_tag("100381")
-    soccer_cap = FinanceController.get_max_price_for_tag("100101")
+    nba_cap = FinanceController.get_max_price_for_tag("745")
+    soccer_cap = FinanceController.get_max_price_for_tag("100350")
+    mlb_cap = FinanceController.get_max_price_for_tag("100381")
     print(f"NBA Max Entry Price: {nba_cap}")
     print(f"Soccer Max Entry Price: {soccer_cap}")
+    print(f"MLB Max Entry Price: {mlb_cap}")
     assert nba_cap == 0.55
     assert soccer_cap == 0.60
+    assert mlb_cap == 0.65
 
     # 5. Test Liquidity Check
     print("\n--- Testing Order Book Liquidity Check ---")

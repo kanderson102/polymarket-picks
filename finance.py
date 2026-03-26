@@ -78,16 +78,23 @@ class FinanceController:
         """
         # Dictionary mapping Tag IDs to Max Prices
         tag_limits = {
-            "100381": 0.55,  # NBA
-            "100382": 0.55,  # NCAAM (Basketball handles both)
-            "100101": 0.60,  # Soccer
-            "100102": 0.60,  # UCL
-            "100383": 0.65,  # MLB
-            "100384": 0.65,  # NHL
-            "100401": 0.65,  # Tennis
-            "100601": 0.90,  # Tech (High Probability setups)
-            "100701": 0.55,  # Politics (High Volatility)
-            "100801": 0.60   # Pop Culture
+            "745": 0.55,      # NBA
+            "28": 0.55,       # Basketball
+            "100350": 0.60,   # Soccer
+            "100977": 0.60,   # UCL
+            "306": 0.60,      # EPL
+            "82": 0.60,       # Premier League
+            "100381": 0.65,   # MLB
+            "678": 0.65,      # baseball
+            "899": 0.65,      # NHL
+            "100088": 0.65,   # Hockey
+            "100089": 0.65,   # Stanley Cup
+            "64": 0.65,       # Esports
+            "2": 0.55,        # Politics (High Volatility)
+            "144": 0.55,      # Elections
+            "100265": 0.55,   # Geopolitics
+            "1": 0.60,        # Sports (generic)
+            "100639": 0.60,   # Games (generic)
         }
         
         return tag_limits.get(str(tag_id), 0.50)  # Default fallback 0.50
@@ -139,10 +146,10 @@ class FinanceController:
             Crypto: 1.56% → 1.80%
         """
         # Peak fee rates by category (as of March 30, 2026 schedule)
-        SPORTS_TAGS = {"100381", "100382", "100383", "100384", "100401", "100101", "100102"}
-        POLITICS_TAGS = {"100701"}
-        TECH_TAGS = {"100601"}
-        POP_CULTURE_TAGS = {"100801"}
+        SPORTS_TAGS = {"745", "28", "100350", "100977", "306", "82", "100381", "678", "899", "100088", "100089", "64", "102366", "1", "100639"}
+        POLITICS_TAGS = {"2", "144", "100265"}
+        TECH_TAGS = set()
+        POP_CULTURE_TAGS = set()
         
         tag = str(tag_id)
         if tag in SPORTS_TAGS:

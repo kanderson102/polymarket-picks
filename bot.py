@@ -47,13 +47,17 @@ GAMMA_API_URL = "https://gamma-api.polymarket.com"
 POLL_INTERVAL = 30  # HTTP polling fallback interval (seconds)
 
 TAG_MAP = {
-    "100381": "NBA", "100382": "NCAAM", "100101": "Soccer", "100102": "UCL",
-    "100383": "MLB", "100384": "NHL", "100401": "Tennis",
-    "100601": "Tech", "100701": "Politics", "100801": "Pop Culture"
+    "745": "NBA", "28": "Basketball", "100350": "Soccer", "100977": "UCL",
+    "306": "EPL", "82": "Premier League",
+    "100381": "MLB", "678": "baseball",
+    "899": "NHL", "100088": "Hockey", "100089": "Stanley Cup",
+    "64": "Esports", "102366": "Dota 2",
+    "2": "Politics", "144": "Elections", "100265": "Geopolitics",
+    "1": "Sports", "100639": "Games",
 }
 
 # Sports tags get 30-day window; everything else gets 14-day window
-SPORTS_TAGS = {"100381", "100382", "100383", "100384", "100401", "100101", "100102"}
+SPORTS_TAGS = {"745", "28", "100350", "100977", "306", "82", "100381", "678", "899", "100088", "100089", "1", "100639", "64", "102366"}
 MAX_DAYS_SPORTS = 30   # Catches playoff series, multi-round tournaments
 MAX_DAYS_DEFAULT = 14  # Politics, Tech, Pop Culture — short-term events only
 

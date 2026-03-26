@@ -82,15 +82,15 @@ class TradingDB:
             cursor.execute("SELECT COUNT(*) FROM specialists")
             if cursor.fetchone()[0] == 0:
                 defaults = [
-                    ("S-Works", "0xee00ba338c59557141789b127927a55f5cc5cea1", "100101,100102,100381", "SHARP"),
-                    ("reachingthesky", "0xefbc5fec8d7b0acdc8911bdd9a98d6964308f9a2", "100101,100102", "SHARP"),
-                    ("HorizonSplendidView", "0x02227b8f5a9636e895607edd3185ed6ee5598ff7", "100383", "SHARP"),
-                    ("CemeterySun", "0x37c1874a60d348903594a96703e0507c518fc53a", "100384,100401", "SHARP"),
-                    ("aenews", "0x44c1dfe43260c94ed4f1d00de2e1f80fb113ebc1", "100701", "WHALE"),
-                    ("LlamaEnjoyer", "0x9b979a065641e8cfde3022a30ed2d9415cf55e12", "100801", "WHALE"),
-                    ("beachboy4", "0xc2e7800b5af46e6093872b177b7a5e7f0563be51", "100381,100101,100102", "SHARP"),
-                    ("CERTuo", "0xf195721ad850377c96cd634457c70cd9e8308057", "100384", "SHARP"),
-                    ("majorexploiter", "0x019782cab5d844f02bafb71f512758be78579f3c", "100101,100102", "SHARP"),
+                    ("S-Works", "0xee00ba338c59557141789b127927a55f5cc5cea1", "64,102366,100639", "SHARP"),
+                    ("reachingthesky", "0xefbc5fec8d7b0acdc8911bdd9a98d6964308f9a2", "100350,100977,1", "SHARP"),
+                    ("HorizonSplendidView", "0x02227b8f5a9636e895607edd3185ed6ee5598ff7", "100350,100977,1", "SHARP"),
+                    ("CemeterySun", "0x37c1874a60d348903594a96703e0507c518fc53a", "745,28,1,100639", "SHARP"),
+                    ("aenews", "0x44c1dfe43260c94ed4f1d00de2e1f80fb113ebc1", "2,100265", "WHALE"),
+                    ("LlamaEnjoyer", "0x9b979a065641e8cfde3022a30ed2d9415cf55e12", "2,100265", "WHALE"),
+                    ("beachboy4", "0xc2e7800b5af46e6093872b177b7a5e7f0563be51", "745,1,100639", "SHARP"),
+                    ("CERTuo", "0xf195721ad850377c96cd634457c70cd9e8308057", "100381,678,1", "SHARP"),
+                    ("majorexploiter", "0x019782cab5d844f02bafb71f512758be78579f3c", "100350,306,82,1", "SHARP"),
                 ]
                 cursor.executemany("INSERT INTO specialists (name, wallet_address, target_tags, tier) VALUES (?, ?, ?, ?)", defaults)
                 
