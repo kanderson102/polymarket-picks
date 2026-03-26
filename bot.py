@@ -56,6 +56,26 @@ TAG_MAP = {
     "1": "Sports", "100639": "Games",
 }
 
+# Tag groups: tags in the same group are considered equivalent for matching.
+TAG_GROUPS = [
+    {"745", "28"},                              # NBA / Basketball
+    {"100350", "306", "82", "100977", "101962"}, # Soccer / EPL / Premier League / UCL
+    {"100381", "678"},                           # MLB / baseball
+    {"899", "100088", "100089"},                 # NHL / Hockey / Stanley Cup
+    {"64", "102366"},                            # Esports / Dota 2
+    {"2", "144", "100265"},                      # Politics / Elections / Geopolitics
+    {"1", "100639"},                             # Sports / Games (generic parents)
+]
+
+
+def expand_tags(tags: list[str]) -> set[str]:
+    """Expand tags to include all related tags from the same groups."""
+    expanded = set(tags)
+    for group in TAG_GROUPS:
+        if expanded & group:
+            expanded |= group
+    return expanded
+
 # Sports tags get 30-day window; everything else gets 14-day window
 SPORTS_TAGS = {"745", "28", "100350", "100977", "306", "82", "100381", "678", "899", "100088", "100089", "1", "100639", "64", "102366"}
 MAX_DAYS_SPORTS = 30   # Catches playoff series, multi-round tournaments
@@ -448,9 +468,11 @@ class PolymarketBot:
                                             pass
                                     
                                     # Find the best matching tag between market and specialist
+                                    # Use tag group expansion so related tags (e.g. Soccer ↔ EPL) match
+                                    expanded_spec_tags = expand_tags(spec.target_tags)
                                     matched_tag = None
                                     for tag in market_tags:
-                                        if tag in spec.target_tags:
+                                        if tag in expanded_spec_tags:
                                             matched_tag = tag
                                             break
                                     

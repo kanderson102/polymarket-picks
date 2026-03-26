@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import os
+import json
 import requests
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
@@ -619,6 +620,87 @@ SPORTS_TAGS = {"745", "28", "100350", "100977", "306", "82", "100381", "678", "8
 MAX_DAYS_SPORTS = 30
 MAX_DAYS_DEFAULT = 14
 
+# Tag groups: tags in the same group are considered equivalent for matching.
+# If a specialist has any tag in a group, they match markets with any tag in that group.
+TAG_GROUPS = [
+    {"745", "28"},                              # NBA / Basketball
+    {"100350", "306", "82", "100977", "101962"}, # Soccer / EPL / Premier League / UCL
+    {"100381", "678"},                           # MLB / baseball
+    {"899", "100088", "100089"},                 # NHL / Hockey / Stanley Cup
+    {"64", "102366"},                            # Esports / Dota 2
+    {"2", "144", "100265"},                      # Politics / Elections / Geopolitics
+    {"1", "100639"},                             # Sports / Games (generic parents)
+]
+
+
+def _expand_tags(tags: list[str]) -> set[str]:
+    """Expand a list of tags to include all related tags from the same groups."""
+    expanded = set(tags)
+    for group in TAG_GROUPS:
+        if expanded & group:  # If any of our tags are in this group
+            expanded |= group  # Add all tags from this group
+    return expanded
+
+
+def _resolve_trade(event_info: dict, trade_title: str, our_outcome: str, trade_dt: datetime) -> str:
+    """Determine if a trade WON, LOST, or is PENDING using Gamma market data.
+
+    Uses outcomePrices from the Gamma API: if a market is closed and
+    outcomePrices shows one outcome at "1" and others at "0", it's resolved.
+    """
+    markets = event_info.get("markets", [])
+
+    for market in markets:
+        # Match our trade to the correct market within the event
+        question = market.get("question", "")
+        if trade_title not in question and question not in trade_title:
+            # Try fuzzy match — sometimes titles differ slightly
+            # Use the slug-based match or check if the key terms overlap
+            title_words = set(trade_title.lower().split())
+            question_words = set(question.lower().split())
+            if len(title_words & question_words) < 2:
+                continue
+
+        if not market.get("closed", False):
+            return "PENDING"
+
+        outcomes = market.get("outcomes", [])
+        outcome_prices = market.get("outcomePrices", [])
+
+        if not outcomes or not outcome_prices:
+            continue
+
+        # Find winning outcome (the one with price "1" or close to it)
+        winning_outcome = None
+        for i, op in enumerate(outcome_prices):
+            try:
+                if float(op) >= 0.95 and i < len(outcomes):
+                    winning_outcome = outcomes[i]
+                    break
+            except (ValueError, TypeError):
+                continue
+
+        if winning_outcome is None:
+            return "PENDING"
+
+        return "WON" if our_outcome == winning_outcome else "LOST"
+
+    # No matching market found — check end date
+    end_date_str = event_info.get("end_date", "")
+    if end_date_str:
+        try:
+            end_dt = datetime.strptime(end_date_str, "%Y-%m-%d")
+            if end_dt < datetime.utcnow():
+                return "LOST"  # Market ended, no resolution data, assume loss
+        except ValueError:
+            pass
+
+    # Fallback: if trade is old enough, mark as lost
+    if (datetime.utcnow() - trade_dt).days > 3:
+        return "LOST"
+
+    return "PENDING"
+
 
 def _fetch_specialist_activity(wallet: str, limit: int = 200) -> list[dict]:
     """Fetch trade activity for a specialist from Polymarket Data API."""
@@ -647,12 +729,12 @@ def _fetch_specialist_activity(wallet: str, limit: int = 200) -> list[dict]:
 
 
 def _lookup_event_info(event_slug: str) -> dict:
-    """Look up market tags and end date from Gamma API (cached in session state).
-    Returns {"tags": [...], "end_date": "YYYY-MM-DD" or ""}."""
+    """Look up market tags, end date, and resolution from Gamma API (cached in session state).
+    Returns {"tags": [...], "end_date": "YYYY-MM-DD", "markets": [...]}."""
     cache_key = f"_event_info_{event_slug}"
     if cache_key in st.session_state:
         return st.session_state[cache_key]
-    result = {"tags": [], "end_date": ""}
+    result = {"tags": [], "end_date": "", "markets": []}
     try:
         resp = requests.get(f"{GAMMA_API_URL}/events?slug={event_slug}", timeout=5)
         if resp.status_code == 200:
@@ -663,13 +745,37 @@ def _lookup_event_info(event_slug: str) -> dict:
                     tag_id = str(tag.get("id", "")) if isinstance(tag, dict) else str(tag)
                     if tag_id:
                         result["tags"].append(tag_id)
-                # Get end date from the first market in the event
+                # Get market resolution data
                 markets = event.get("markets", [])
+                for m in markets:
+                    # outcomes and outcomePrices may be JSON strings from the API
+                    raw_outcomes = m.get("outcomes", [])
+                    raw_prices = m.get("outcomePrices", [])
+                    if isinstance(raw_outcomes, str):
+                        try:
+                            raw_outcomes = json.loads(raw_outcomes)
+                        except (json.JSONDecodeError, TypeError):
+                            raw_outcomes = []
+                    if isinstance(raw_prices, str):
+                        try:
+                            raw_prices = json.loads(raw_prices)
+                        except (json.JSONDecodeError, TypeError):
+                            raw_prices = []
+                    market_info = {
+                        "question": m.get("question", ""),
+                        "slug": m.get("slug", ""),
+                        "closed": bool(m.get("closed", False)),
+                        "outcomes": raw_outcomes,
+                        "outcomePrices": raw_prices,
+                        "endDate": m.get("endDate", ""),
+                        "conditionId": m.get("conditionId", ""),
+                    }
+                    result["markets"].append(market_info)
+                # End date from first market
                 if markets:
-                    end = markets[0].get("endDate", "") or markets[0].get("end_date_iso", "")
+                    end = markets[0].get("endDate", "")
                     if end:
                         result["end_date"] = end.split("T")[0] if "T" in end else end
-                # Fallback to event-level endDate
                 if not result["end_date"]:
                     end = event.get("endDate", "") or event.get("end_date_iso", "")
                     if end:
@@ -725,7 +831,6 @@ def render_historical_backtest(db):
     cutoff = datetime.utcnow() - timedelta(days=lookback_days)
     progress = st.progress(0, text="Fetching specialist trade history...")
     all_buys = []  # (timestamp, specialist_dict, trade_dict)
-    redeemed_conditions = {}  # conditionId -> True (specialist redeemed = WON)
 
     for i, spec in enumerate(selected_specs):
         progress.progress((i) / len(selected_specs), text=f"Fetching {spec['name']}...")
@@ -744,13 +849,7 @@ def render_historical_backtest(db):
             if trade_dt < cutoff:
                 continue
 
-            act_type = act.get("type", "")
-            condition_id = act.get("conditionId", "")
-
-            if act_type == "REDEEM" and condition_id:
-                redeemed_conditions[condition_id] = True
-
-            if act_type == "TRADE" and act.get("side") == "BUY":
+            if act.get("type") == "TRADE" and act.get("side") == "BUY":
                 all_buys.append((trade_dt, spec, act))
 
     progress.progress(1.0, text="Processing trades...")
@@ -791,12 +890,13 @@ def render_historical_backtest(db):
             trade_log.append({"Date": trade_dt, "Specialist": spec["name"], "Market": title, "Outcome": outcome, "Price": price, "Action": "SKIP: Collision", "P&L": 0, "Balance": balance})
             continue
 
-        # 2. Tag matching — use full event info (tags + end date)
-        event_info = _lookup_event_info(event_slug) if event_slug else {"tags": [], "end_date": ""}
+        # 2. Tag matching — use full event info with tag group expansion
+        event_info = _lookup_event_info(event_slug) if event_slug else {"tags": [], "end_date": "", "markets": []}
         market_tags = event_info["tags"]
+        expanded_spec_tags = _expand_tags(spec["tags"])
         matched_tag = None
         for tag in market_tags:
-            if tag in spec["tags"]:
+            if tag in expanded_spec_tags:
                 matched_tag = tag
                 break
         if market_tags and matched_tag is None:
@@ -850,41 +950,28 @@ def render_historical_backtest(db):
         # Fee
         fee = bet_size * FinanceController.estimate_taker_fee(price, matched_tag)
 
-        # Determine outcome from redemption data (conditionId is the reliable join key)
-        condition_id = act.get("conditionId", "")
-        was_redeemed = redeemed_conditions.get(condition_id, False)
+        # Determine outcome from Gamma API market resolution data
+        # Check if the market is closed and who won via outcomePrices
+        trade_result = _resolve_trade(event_info, title, outcome, trade_dt)
 
         seen_slugs.add(collision_key)
         stats["copied"] += 1
 
-        if was_redeemed:
+        if trade_result == "WON":
             payout = (bet_size / price) - fee
             pnl = payout - bet_size
             balance += pnl
             stats["won"] += 1
             action = "WON"
+        elif trade_result == "LOST":
+            pnl = -(bet_size + fee)
+            balance += pnl
+            stats["lost"] += 1
+            action = "LOST"
         else:
-            # Determine if market has ended using Gamma end date or trade age
-            market_ended = False
-            if end_date_str:
-                try:
-                    end_dt = datetime.strptime(end_date_str, "%Y-%m-%d")
-                    market_ended = end_dt < datetime.utcnow()
-                except ValueError:
-                    pass
-            if not market_ended:
-                # Fallback: if trade is > 7 days old and no redeem, likely lost
-                market_ended = (datetime.utcnow() - trade_dt).days > 7
-
-            if market_ended:
-                pnl = -(bet_size + fee)
-                balance += pnl
-                stats["lost"] += 1
-                action = "LOST"
-            else:
-                pnl = 0
-                stats["pending"] += 1
-                action = "PENDING"
+            pnl = 0
+            stats["pending"] += 1
+            action = "PENDING"
 
         balance = max(0.0, balance)
 
