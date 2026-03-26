@@ -39,8 +39,17 @@ def get_human_readable_tags(tags):
 
 REVERSE_TAG_MAP = {v: k for k, v in TAG_MAP.items()}
 
+def _init_saved_views():
+    """Initialize session state for saved backtest views."""
+    if "saved_mc_views" not in st.session_state:
+        st.session_state.saved_mc_views = []
+    if "saved_hb_views" not in st.session_state:
+        st.session_state.saved_hb_views = []
+
+
 def main():
     st.set_page_config(page_title="Polymarket Copy-Bot", layout="wide")
+    _init_saved_views()
     db = TradingDB()
 
     st.sidebar.title("Navigation")
@@ -320,17 +329,31 @@ def render_backtest(db):
     min_buffer = st.sidebar.number_input("Min Buffer ($)", min_value=1.0, max_value=50.0, value=5.0, step=1.0)
     max_slippage = st.sidebar.slider("Max Slippage Reject (%)", min_value=0.5, max_value=10.0, value=2.5, step=0.5)
 
+    # Collect current params for saved views
+    mc_params = {
+        "bankroll": bankroll, "days": days, "num_simulations": num_simulations,
+        "num_sharp": num_sharp, "num_whale": num_whale,
+        "sharp_wr": sharp_wr, "whale_wr": whale_wr,
+        "trades_per_day": trades_per_day, "avg_entry_price": avg_entry_price,
+        "slippage_pct": slippage_pct, "avg_fee_rate": avg_fee_rate,
+        "enable_harvest": enable_harvest, "min_buffer": min_buffer,
+        "max_slippage": max_slippage,
+    }
+
     if st.button("Run Simulation", type="primary"):
-        results = _run_monte_carlo(
-            bankroll=bankroll, days=days, num_simulations=num_simulations,
-            num_sharp=num_sharp, num_whale=num_whale,
-            sharp_wr=sharp_wr, whale_wr=whale_wr,
-            trades_per_day=trades_per_day, avg_entry_price=avg_entry_price,
-            slippage_pct=slippage_pct, avg_fee_rate=avg_fee_rate,
-            enable_harvest=enable_harvest, min_buffer=min_buffer,
-            max_slippage=max_slippage,
-        )
-        _render_backtest_results(results, bankroll, days, enable_harvest)
+        results = _run_monte_carlo(**mc_params)
+        st.session_state["_last_mc_results"] = results
+        st.session_state["_last_mc_params"] = mc_params
+
+    # Render last results if available
+    results = st.session_state.get("_last_mc_results")
+    params = st.session_state.get("_last_mc_params")
+    if results is not None and params is not None:
+        _render_backtest_results(results, params["bankroll"], params["days"], params["enable_harvest"])
+        _render_save_view_mc(results, params)
+
+    # Always show saved views comparison at bottom
+    _render_saved_mc_comparison()
 
 
 def _run_monte_carlo(*, bankroll, days, num_simulations, num_sharp, num_whale,
@@ -616,6 +639,92 @@ def _render_backtest_results(results, bankroll, days, enable_harvest):
     st.table(pd.DataFrame(stats))
 
 
+def _render_save_view_mc(results, params):
+    """Save current Monte Carlo results as a named view."""
+    st.markdown("---")
+    st.subheader("Save This View")
+    col_name, col_btn = st.columns([3, 1])
+    with col_name:
+        view_name = st.text_input("View Name", value=f"View {len(st.session_state.saved_mc_views) + 1}", key="mc_view_name")
+    with col_btn:
+        st.write("")  # spacer
+        if st.button("Save View", key="mc_save_btn"):
+            finals = results["final_balances"]
+            harvested = results["harvested"]
+            trades = results["trades"]
+            wins = results["wins"]
+            losses = results["losses"]
+            max_dd = results["max_drawdown"]
+            bankroll = params["bankroll"]
+            median_final = float(np.median(finals))
+            roi = ((median_final - bankroll) / bankroll) * 100
+            avg_wr = float(np.mean(wins / np.maximum(wins + losses, 1)) * 100)
+            view = {
+                "name": view_name,
+                "params": params.copy(),
+                "metrics": {
+                    "median_final": median_final,
+                    "mean_final": float(np.mean(finals)),
+                    "p5": float(np.percentile(finals, 5)),
+                    "p95": float(np.percentile(finals, 95)),
+                    "roi": roi,
+                    "avg_win_rate": avg_wr,
+                    "avg_max_dd": float(np.mean(max_dd) * 100),
+                    "median_trades": int(np.median(trades)),
+                    "median_harvested": float(np.median(harvested)),
+                    "ruin_rate": float(np.mean(finals < 5) * 100),
+                },
+            }
+            st.session_state.saved_mc_views.append(view)
+            st.success(f"Saved **{view_name}**")
+            st.rerun()
+
+
+def _render_saved_mc_comparison():
+    """Show saved Monte Carlo views in a comparison table."""
+    views = st.session_state.saved_mc_views
+    if not views:
+        return
+
+    st.markdown("---")
+    st.header("Saved Views Comparison")
+
+    # Build comparison table
+    rows = []
+    for v in views:
+        m = v["metrics"]
+        p = v["params"]
+        rows.append({
+            "View": v["name"],
+            "Bankroll": f"${p['bankroll']:.0f}",
+            "Days": p["days"],
+            "Sims": p["num_simulations"],
+            "SHARP/WHALE": f"{p['num_sharp']}/{p['num_whale']}",
+            "SHARP WR": f"{p['sharp_wr']:.0f}%",
+            "WHALE WR": f"{p['whale_wr']:.0f}%",
+            "Trades/Day": p["trades_per_day"],
+            "Median Final": f"${m['median_final']:.2f}",
+            "ROI": f"{m['roi']:+.1f}%",
+            "Win Rate": f"{m['avg_win_rate']:.1f}%",
+            "Max DD": f"{m['avg_max_dd']:.1f}%",
+            "P5": f"${m['p5']:.2f}",
+            "P95": f"${m['p95']:.2f}",
+            "Harvested": f"${m['median_harvested']:.2f}",
+            "Ruin %": f"{m['ruin_rate']:.1f}%",
+        })
+
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    # Delete buttons
+    st.caption("Remove saved views:")
+    cols = st.columns(min(len(views), 6))
+    for i, v in enumerate(views):
+        with cols[i % len(cols)]:
+            if st.button(f"Delete: {v['name']}", key=f"mc_del_{i}"):
+                st.session_state.saved_mc_views.pop(i)
+                st.rerun()
+
+
 SPORTS_TAGS = {"745", "28", "100350", "100977", "306", "82", "100381", "678", "899", "100088", "100089", "1", "100639", "64", "102366"}
 MAX_DAYS_SPORTS = 30
 MAX_DAYS_DEFAULT = 14
@@ -818,8 +927,30 @@ def render_historical_backtest(db):
     spec_names = [s["name"] for s in active_specs]
     selected = st.sidebar.multiselect("Specialists to Include", spec_names, default=spec_names, key="hb_specs")
 
-    if not st.button("Run Historical Backtest", type="primary", key="hb_run"):
-        st.info("Configure parameters in the sidebar and click **Run Historical Backtest** to begin.")
+    hb_params = {
+        "bankroll": bankroll, "max_trades_per_spec": max_trades_per_spec,
+        "lookback_days": lookback_days, "enable_harvest": enable_harvest,
+        "min_buffer": min_buffer, "max_days_sports": max_days_sports,
+        "max_days_other": max_days_other, "selected": selected,
+    }
+
+    run_clicked = st.button("Run Historical Backtest", type="primary", key="hb_run")
+
+    # Always show saved views comparison
+    _render_saved_hb_comparison()
+
+    if not run_clicked:
+        if "_last_hb_results" not in st.session_state:
+            st.info("Configure parameters in the sidebar and click **Run Historical Backtest** to begin.")
+        else:
+            # Re-render last results
+            last = st.session_state["_last_hb_results"]
+            _render_historical_results(
+                last["trade_log"], last["equity_curve"], last["stats"],
+                last["bankroll"], last["final_balance"],
+                last["harvested_total"], last["lookback_days"], last["enable_harvest"],
+            )
+            _render_save_view_hb(last)
         return
 
     selected_specs = [s for s in active_specs if s["name"] in selected]
@@ -993,11 +1124,21 @@ def render_historical_backtest(db):
 
     progress.empty()
 
+    # Cache results for re-rendering and saving
+    hb_result_data = {
+        "trade_log": trade_log, "equity_curve": equity_curve, "stats": stats,
+        "bankroll": bankroll, "final_balance": balance,
+        "harvested_total": harvested_total, "lookback_days": lookback_days,
+        "enable_harvest": enable_harvest, "params": hb_params,
+    }
+    st.session_state["_last_hb_results"] = hb_result_data
+
     # --- Render Results ---
     _render_historical_results(
         trade_log, equity_curve, stats, bankroll, balance,
         harvested_total, lookback_days, enable_harvest,
     )
+    _render_save_view_hb(hb_result_data)
 
 
 def _render_historical_results(trade_log, equity_curve, stats, bankroll, final_balance,
@@ -1094,6 +1235,90 @@ def _render_historical_results(trade_log, equity_curve, stats, bankroll, final_b
         st.dataframe(log_df, use_container_width=True, hide_index=True, height=500)
     else:
         st.info("No trades to display.")
+
+
+def _render_save_view_hb(result_data):
+    """Save current historical backtest results as a named view."""
+    st.markdown("---")
+    st.subheader("Save This View")
+    col_name, col_btn = st.columns([3, 1])
+    with col_name:
+        view_name = st.text_input("View Name", value=f"View {len(st.session_state.saved_hb_views) + 1}", key="hb_view_name")
+    with col_btn:
+        st.write("")
+        if st.button("Save View", key="hb_save_btn"):
+            s = result_data["stats"]
+            p = result_data.get("params", {})
+            total_resolved = s["won"] + s["lost"]
+            win_rate = (s["won"] / total_resolved * 100) if total_resolved > 0 else 0
+            total_value = result_data["final_balance"] + result_data["harvested_total"]
+            roi = ((total_value - result_data["bankroll"]) / result_data["bankroll"]) * 100
+            view = {
+                "name": view_name,
+                "params": p,
+                "metrics": {
+                    "final_value": total_value,
+                    "final_balance": result_data["final_balance"],
+                    "roi": roi,
+                    "copied": s["copied"],
+                    "won": s["won"],
+                    "lost": s["lost"],
+                    "pending": s["pending"],
+                    "win_rate": win_rate,
+                    "skipped_tag": s["skipped_tag"],
+                    "skipped_price": s["skipped_price"],
+                    "skipped_date": s["skipped_date"],
+                    "skipped_collision": s["skipped_collision"],
+                    "harvested": result_data["harvested_total"],
+                },
+            }
+            st.session_state.saved_hb_views.append(view)
+            st.success(f"Saved **{view_name}**")
+            st.rerun()
+
+
+def _render_saved_hb_comparison():
+    """Show saved historical backtest views in a comparison table."""
+    views = st.session_state.saved_hb_views
+    if not views:
+        return
+
+    st.markdown("---")
+    st.header("Saved Views Comparison")
+
+    rows = []
+    for v in views:
+        m = v["metrics"]
+        p = v["params"]
+        rows.append({
+            "View": v["name"],
+            "Bankroll": f"${p.get('bankroll', 0):.0f}",
+            "Lookback": f"{p.get('lookback_days', 0)}d",
+            "Sports Max": f"{p.get('max_days_sports', 0)}d",
+            "Other Max": f"{p.get('max_days_other', 0)}d",
+            "Specialists": len(p.get("selected", [])),
+            "Final Value": f"${m['final_value']:.2f}",
+            "ROI": f"{m['roi']:+.1f}%",
+            "Copied": m["copied"],
+            "Won": m["won"],
+            "Lost": m["lost"],
+            "Pending": m["pending"],
+            "Win Rate": f"{m['win_rate']:.0f}%",
+            "Tag Skip": m["skipped_tag"],
+            "Price Skip": m["skipped_price"],
+            "Date Skip": m["skipped_date"],
+            "Harvested": f"${m['harvested']:.2f}",
+        })
+
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+    st.caption("Remove saved views:")
+    cols = st.columns(min(len(views), 6))
+    for i, v in enumerate(views):
+        with cols[i % len(cols)]:
+            if st.button(f"Delete: {v['name']}", key=f"hb_del_{i}"):
+                st.session_state.saved_hb_views.pop(i)
+                st.rerun()
 
 
 def render_architecture():
