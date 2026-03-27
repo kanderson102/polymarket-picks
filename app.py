@@ -812,16 +812,20 @@ def _resolve_trade(event_info: dict, trade_title: str, our_outcome: str, trade_d
     return "PENDING"
 
 
-def _fetch_specialist_activity(wallet: str, limit: int = 200) -> list[dict]:
-    """Fetch trade activity for a specialist from Polymarket Data API."""
+def _fetch_specialist_activity(wallet: str, cutoff_dt: datetime = None, limit: int = 2000) -> list[dict]:
+    """Fetch trade activity for a specialist from Polymarket Data API.
+
+    Paginates until cutoff_dt is reached (date-based) or limit records fetched (safety cap).
+    This ensures heavy traders (15+ trades/day) don't run out of records before the lookback window.
+    """
     all_activity = []
     offset = 0
-    batch = 50
-    while offset < limit:
+    batch = 100
+    while len(all_activity) < limit:
         try:
             resp = requests.get(
                 f"{DATA_API_URL}/activity",
-                params={"user": wallet, "limit": min(batch, limit - offset), "offset": offset},
+                params={"user": wallet, "limit": batch, "offset": offset},
                 timeout=10,
             )
             if resp.status_code != 200:
@@ -830,8 +834,21 @@ def _fetch_specialist_activity(wallet: str, limit: int = 200) -> list[dict]:
             if not data:
                 break
             all_activity.extend(data)
+            # If cutoff provided, check if oldest record in this page is already past cutoff
+            if cutoff_dt and data:
+                oldest = data[-1]
+                ts = oldest.get("timestamp", 0)
+                if isinstance(ts, str):
+                    try:
+                        oldest_dt = datetime.fromisoformat(ts.replace("Z", "+00:00")).replace(tzinfo=None)
+                    except Exception:
+                        oldest_dt = None
+                else:
+                    oldest_dt = datetime.utcfromtimestamp(ts / 1000 if ts > 1e12 else ts)
+                if oldest_dt and oldest_dt < cutoff_dt:
+                    break  # We've gone past the lookback window — stop fetching
             if len(data) < batch:
-                break
+                break  # API returned fewer than requested — no more pages
             offset += batch
         except Exception:
             break
@@ -982,7 +999,6 @@ def render_historical_backtest(db):
     st.sidebar.markdown("---")
     st.sidebar.header("Historical Backtest")
     bankroll = st.sidebar.number_input("Starting Bankroll ($)", min_value=10.0, max_value=100000.0, value=50.0, step=10.0, key="hb_bankroll")
-    max_trades_per_spec = st.sidebar.slider("Max Trades to Fetch (per specialist)", 50, 500, 200, step=50, key="hb_limit")
     lookback_days = st.sidebar.slider("Lookback Window (days)", 7, 180, 60, key="hb_lookback")
     enable_harvest = st.sidebar.checkbox("Enable 2x Harvest Rule", value=True, key="hb_harvest")
     min_buffer = st.sidebar.number_input("Min Buffer ($)", min_value=1.0, max_value=50.0, value=5.0, step=1.0, key="hb_buffer")
@@ -1019,7 +1035,7 @@ def render_historical_backtest(db):
     selected = st.sidebar.multiselect("Specialists to Include", spec_names, default=spec_names, key="hb_specs")
 
     hb_params = {
-        "bankroll": bankroll, "max_trades_per_spec": max_trades_per_spec,
+        "bankroll": bankroll,
         "lookback_days": lookback_days, "enable_harvest": enable_harvest,
         "min_buffer": min_buffer, "max_days_sports": max_days_sports,
         "max_days_other": max_days_other, "selected": selected,
@@ -1060,7 +1076,7 @@ def render_historical_backtest(db):
 
     for i, spec in enumerate(selected_specs):
         progress.progress((i) / len(selected_specs), text=f"Fetching {spec['name']}...")
-        activity = _fetch_specialist_activity(spec["wallet"], limit=max_trades_per_spec)
+        activity = _fetch_specialist_activity(spec["wallet"], cutoff_dt=cutoff)
 
         for act in activity:
             ts = act.get("timestamp", 0)
@@ -1420,12 +1436,36 @@ def _render_historical_results(trade_log, equity_curve, stats, bankroll, final_b
                 total_pnl = group["P&L"].sum()
                 resolved = wins + losses
                 wr = (wins / resolved * 100) if resolved > 0 else 0
+                # EV analysis: at avg entry price P, need WR > P to profit
+                # EV = WR*(1-P)/P - (1-WR)  →  positive means +edge
+                avg_price = group["Price"].mean() if "Price" in group.columns else 0
+                if resolved > 0 and avg_price > 0:
+                    wr_frac = wr / 100
+                    ev = wr_frac * (1 - avg_price) / avg_price - (1 - wr_frac)
+                    breakeven_wr = avg_price * 100  # Need WR% > avg_price% to profit
+                    ev_str = f"{ev:+.3f}"
+                    verdict = "✅" if ev > 0 else ("⚠️" if ev > -0.05 else "❌")
+                else:
+                    ev_str = "N/A"
+                    breakeven_wr = 0
+                    verdict = "⏳" if pending > 0 else "N/A"
                 spec_stats.append({
-                    "Specialist": name, "Copied": len(group),
-                    "Won": wins, "Lost": losses, "Pending": pending,
-                    "Win Rate": f"{wr:.0f}%", "P&L": f"${total_pnl:+.2f}",
+                    "Specialist": name,
+                    "Copied": len(group),
+                    "Won": wins,
+                    "Lost": losses,
+                    "Pending": pending,
+                    "Win Rate": f"{wr:.0f}%" if resolved > 0 else "—",
+                    "Breakeven": f"{breakeven_wr:.0f}%" if breakeven_wr else "—",
+                    "Edge": f"{verdict} {ev_str}",
+                    "P&L": f"${total_pnl:+.2f}",
                 })
             st.table(pd.DataFrame(spec_stats))
+            st.caption(
+                "**Breakeven**: minimum win rate needed at avg entry price to be profitable. "
+                "**Edge**: positive = +EV, negative = you need better accuracy than these picks provide. "
+                "⚠️ within 5% of breakeven. ⏳ all trades still pending."
+            )
         else:
             st.info("No trades were copied.")
 
