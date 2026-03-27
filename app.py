@@ -3,6 +3,7 @@ import pandas as pd
 import numpy as np
 import os
 import json
+import time
 import requests
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
@@ -1252,19 +1253,30 @@ def _render_save_view_hb(result_data):
     """Save current historical backtest results as a named view."""
     st.markdown("---")
     st.subheader("Save This View")
+
+    # Auto-generate a descriptive default name from key parameters
+    p = result_data.get("params", {})
+    s = result_data["stats"]
+    n_specs = len(p.get("selected", []))
+    auto_name = (
+        f"${p.get('bankroll', 0):.0f} | {p.get('lookback_days', 0)}d | "
+        f"{p.get('max_days_sports', 0)}d sports | {n_specs} specs"
+    )
+
+    # Use a counter-based key so the input resets after each save
+    save_count = len(st.session_state.saved_hb_views)
     col_name, col_btn = st.columns([3, 1])
     with col_name:
-        view_name = st.text_input("View Name", value=f"View {len(st.session_state.saved_hb_views) + 1}", key="hb_view_name")
+        view_name = st.text_input("View Name", value=auto_name, key=f"hb_view_name_{save_count}")
     with col_btn:
         st.write("")
-        if st.button("Save View", key="hb_save_btn"):
-            s = result_data["stats"]
-            p = result_data.get("params", {})
+        if st.button("Save View", key=f"hb_save_btn_{save_count}"):
             total_resolved = s["won"] + s["lost"]
             win_rate = (s["won"] / total_resolved * 100) if total_resolved > 0 else 0
             total_value = result_data["final_balance"] + result_data.get("pending_exposure", 0.0) + result_data["harvested_total"]
             roi = ((total_value - result_data["bankroll"]) / result_data["bankroll"]) * 100
             view = {
+                "id": f"v_{save_count}_{int(time.time())}",
                 "name": view_name,
                 "params": p,
                 "metrics": {
@@ -1326,9 +1338,13 @@ def _render_saved_hb_comparison():
     st.caption("Remove saved views:")
     cols = st.columns(min(len(views), 6))
     for i, v in enumerate(views):
+        view_id = v.get("id", f"legacy_{i}")
         with cols[i % len(cols)]:
-            if st.button(f"Delete: {v['name']}", key=f"hb_del_{i}"):
-                st.session_state.saved_hb_views.pop(i)
+            if st.button(f"❌ {v['name']}", key=f"hb_del_{view_id}"):
+                st.session_state.saved_hb_views = [
+                    sv for sv in st.session_state.saved_hb_views
+                    if sv.get("id") != v.get("id") or sv["name"] != v["name"]
+                ]
                 st.rerun()
 
 
