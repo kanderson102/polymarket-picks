@@ -901,6 +901,79 @@ def _lookup_event_tags(event_slug: str) -> list[str]:
     return _lookup_event_info(event_slug).get("tags", [])
 
 
+def _aggregate_fills(all_events: list, window_minutes: int = 10) -> list[dict]:
+    """
+    Aggregate rapid-fire fills into single position entries.
+
+    When a specialist places a large order, Polymarket's CLOB splits it into many
+    small fills (often 30-50 fills within minutes for a single position). This
+    function groups fills by specialist+slug+outcome within a time window and
+    produces one aggregated position entry with:
+      - VWAP price (volume-weighted average)
+      - Total USD size
+      - Fill count
+      - Timestamp of the first fill
+    """
+    if not all_events:
+        return []
+
+    window = timedelta(minutes=window_minutes)
+    positions = []
+    # Buffer: key = (spec_name, slug, outcome, side) -> list of (dt, price, size_usd)
+    buffer = {}
+    buffer_start = {}  # key -> first timestamp
+
+    def flush_key(key):
+        fills = buffer.pop(key, [])
+        start_dt = buffer_start.pop(key, None)
+        if not fills:
+            return
+        total_size = sum(f[2] for f in fills)
+        vwap = sum(f[1] * f[2] for f in fills) / total_size if total_size > 0 else fills[0][1]
+        spec_name, slug, outcome, side = key
+        # Find the spec dict from the first fill
+        spec_dict = fills[0][3] if len(fills[0]) > 3 else {}
+        title = fills[0][4] if len(fills[0]) > 4 else "Unknown"
+        positions.append({
+            "dt": start_dt, "spec": spec_dict, "side": side,
+            "title": title, "slug": slug, "outcome": outcome,
+            "vwap": vwap, "total_size": total_size,
+            "fill_count": len(fills),
+        })
+
+    for trade_dt, spec, act in all_events:
+        slug = act.get("eventSlug", act.get("slug", ""))
+        outcome = act.get("outcome", "Yes")
+        side = act.get("side", "BUY")
+        price = float(act.get("price", 0))
+        # Size in USD: quantity * price. Activity API gives "size" as share count.
+        share_count = float(act.get("size", 0))
+        size_usd = share_count * price if share_count > 0 else price
+
+        key = (spec["name"], slug, outcome, side)
+
+        if key in buffer:
+            # Check if within the time window from the first fill
+            if trade_dt - buffer_start[key] <= window:
+                buffer[key].append((trade_dt, price, size_usd, spec, act.get("title", "Unknown")))
+                continue
+            else:
+                # Window expired — flush and start new
+                flush_key(key)
+
+        # Start new buffer entry
+        buffer[key] = [(trade_dt, price, size_usd, spec, act.get("title", "Unknown"))]
+        buffer_start[key] = trade_dt
+
+    # Flush remaining
+    for key in list(buffer.keys()):
+        flush_key(key)
+
+    # Sort by timestamp
+    positions.sort(key=lambda x: x["dt"])
+    return positions
+
+
 def render_historical_backtest(db):
     st.title("📜 Historical Backtest")
     st.markdown("Replay your specialists' **real Polymarket trades** through the bot's strategy rules to see what it would have copied and the resulting P&L.")
@@ -913,10 +986,27 @@ def render_historical_backtest(db):
     lookback_days = st.sidebar.slider("Lookback Window (days)", 7, 180, 60, key="hb_lookback")
     enable_harvest = st.sidebar.checkbox("Enable 2x Harvest Rule", value=True, key="hb_harvest")
     min_buffer = st.sidebar.number_input("Min Buffer ($)", min_value=1.0, max_value=50.0, value=5.0, step=1.0, key="hb_buffer")
+
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Strategy Filters")
+    enable_tag_filter = st.sidebar.checkbox("Enable Category Filtering",
+        value=False, key="hb_tag_filter",
+        help="OFF = copy everything the specialist trades (recommended). ON = only copy trades matching their assigned tags.")
+    max_price_cap = st.sidebar.slider("Max Entry Price (Value Cap)", 0.50, 0.95, 0.82, step=0.01, key="hb_price_cap",
+        help="Skip trades priced above this. Pro services use 0.80-0.85.")
+    enable_fill_aggregation = st.sidebar.checkbox("Aggregate Fills (Debounce)",
+        value=True, key="hb_aggregate",
+        help="Group rapid-fire fills for the same market into one position entry with VWAP price.")
+    fill_window_min = st.sidebar.slider("Fill Aggregation Window (minutes)", 1, 30, 10, key="hb_fill_window",
+        help="Time window to group fills from the same specialist on the same market.")
+    enable_exit_copy = st.sidebar.checkbox("Copy Exits (Sell Signals)",
+        value=True, key="hb_exit_copy",
+        help="When a specialist sells shares, close the position proportionally.")
+
     st.sidebar.markdown("---")
     st.sidebar.subheader("Date Filter")
-    max_days_sports = st.sidebar.slider("Max Days Out (Sports)", 7, 90, 30, key="hb_max_days_sports")
-    max_days_other = st.sidebar.slider("Max Days Out (Non-Sports)", 7, 90, 14, key="hb_max_days_other")
+    max_days_sports = st.sidebar.slider("Max Days Out (Sports)", 7, 180, 60, key="hb_max_days_sports")
+    max_days_other = st.sidebar.slider("Max Days Out (Non-Sports)", 7, 180, 90, key="hb_max_days_other")
 
     specialists = db.get_all_specialists()
     active_specs = [s for s in specialists if s.get("is_active", True) and "MOCK" not in s["wallet"]]
@@ -933,6 +1023,9 @@ def render_historical_backtest(db):
         "lookback_days": lookback_days, "enable_harvest": enable_harvest,
         "min_buffer": min_buffer, "max_days_sports": max_days_sports,
         "max_days_other": max_days_other, "selected": selected,
+        "enable_tag_filter": enable_tag_filter, "max_price_cap": max_price_cap,
+        "enable_fill_aggregation": enable_fill_aggregation,
+        "fill_window_min": fill_window_min, "enable_exit_copy": enable_exit_copy,
     }
 
     run_clicked = st.button("Run Historical Backtest", type="primary", key="hb_run")
@@ -963,7 +1056,7 @@ def render_historical_backtest(db):
     # --- Fetch Activity ---
     cutoff = datetime.utcnow() - timedelta(days=lookback_days)
     progress = st.progress(0, text="Fetching specialist trade history...")
-    all_buys = []  # (timestamp, specialist_dict, trade_dict)
+    all_events = []  # (timestamp, specialist_dict, trade_dict)
 
     for i, spec in enumerate(selected_specs):
         progress.progress((i) / len(selected_specs), text=f"Fetching {spec['name']}...")
@@ -982,73 +1075,147 @@ def render_historical_backtest(db):
             if trade_dt < cutoff:
                 continue
 
-            if act.get("type") == "TRADE" and act.get("side") == "BUY":
-                all_buys.append((trade_dt, spec, act))
+            side = act.get("side", "")
+            if act.get("type") == "TRADE" and side in ("BUY", "SELL"):
+                all_events.append((trade_dt, spec, act))
 
-    progress.progress(1.0, text="Processing trades...")
+    progress.progress(0.8, text="Aggregating fills...")
 
-    if not all_buys:
+    if not all_events:
         progress.empty()
-        st.warning(f"No BUY trades found in the last {lookback_days} days for selected specialists.")
+        st.warning(f"No trades found in the last {lookback_days} days for selected specialists.")
         return
 
     # Sort chronologically
-    all_buys.sort(key=lambda x: x[0])
+    all_events.sort(key=lambda x: x[0])
+
+    # --- Fill Aggregation ---
+    # Group rapid-fire fills for the same specialist+slug+outcome into single positions
+    if enable_fill_aggregation:
+        aggregated = _aggregate_fills(all_events, fill_window_min)
+    else:
+        # No aggregation — each fill is its own position entry
+        aggregated = []
+        for trade_dt, spec, act in all_events:
+            size_usd = float(act.get("size", 0)) * float(act.get("price", 0))
+            aggregated.append({
+                "dt": trade_dt, "spec": spec, "side": act.get("side"),
+                "title": act.get("title", "Unknown"),
+                "slug": act.get("eventSlug", act.get("slug", "")),
+                "outcome": act.get("outcome", "Yes"),
+                "vwap": float(act.get("price", 0)),
+                "total_size": size_usd,
+                "fill_count": 1,
+            })
+
+    progress.progress(0.9, text="Running simulation...")
+
+    # Compute per-specialist average position size for conviction sizing
+    spec_sizes = {}  # spec_name -> list of position sizes
+    for pos in aggregated:
+        if pos["side"] == "BUY" and pos["total_size"] > 0:
+            spec_sizes.setdefault(pos["spec"]["name"], []).append(pos["total_size"])
+    spec_avg_size = {name: sum(sizes) / len(sizes) for name, sizes in spec_sizes.items() if sizes}
 
     # --- Simulate ---
     balance = bankroll
     baseline = bankroll
     harvested_total = 0.0
-    equity_curve = [(all_buys[0][0], balance)]
+    equity_curve = [(aggregated[0]["dt"], balance)]
     trade_log = []
-    seen_slugs = set()  # slug+outcome collision tracking
-    pending_exposure = 0.0  # Track capital locked in unresolved shares
-    stats = {"copied": 0, "skipped_tag": 0, "skipped_price": 0, "skipped_buffer": 0, "skipped_collision": 0, "skipped_date": 0, "won": 0, "lost": 0, "pending": 0}
+    open_positions = {}  # collision_key -> {"bet_size": x, "price": y, "tag": z}
+    pending_exposure = 0.0
+    stats = {"copied": 0, "skipped_tag": 0, "skipped_price": 0, "skipped_buffer": 0,
+             "skipped_collision": 0, "skipped_date": 0, "skipped_conviction": 0,
+             "sold": 0, "won": 0, "lost": 0, "pending": 0}
 
-    for trade_dt, spec, act in all_buys:
-        title = act.get("title", "Unknown")
-        event_slug = act.get("eventSlug", act.get("slug", ""))
-        outcome = act.get("outcome", "Yes")
-        price = float(act.get("price", 0))
-        asset = act.get("asset", "")
+    for pos in aggregated:
+        trade_dt = pos["dt"]
+        spec = pos["spec"]
+        title = pos["title"]
+        event_slug = pos["slug"]
+        outcome = pos["outcome"]
+        price = pos["vwap"]
+        side = pos["side"]
+        fill_count = pos["fill_count"]
+        spec_position_size = pos["total_size"]
 
         if price <= 0:
             continue
 
-        # --- Apply Strategy Filters ---
+        collision_key = f"{event_slug}:{outcome}"
+
+        # --- SELL handling (exit copying) ---
+        if side == "SELL":
+            if not enable_exit_copy:
+                continue
+            if collision_key in open_positions:
+                held = open_positions[collision_key]
+                # Specialist is selling — close our position proportionally
+                # Return the bet_size (shares convert back to cash at current price)
+                sell_value = held["bet_size"] * (price / held["price"])  # Approximate
+                balance += sell_value
+                pending_exposure -= held["bet_size"]
+                pending_exposure = max(0.0, pending_exposure)
+                pnl = sell_value - held["bet_size"]
+                stats["sold"] += 1
+                if pnl >= 0:
+                    stats["won"] += 1
+                else:
+                    stats["lost"] += 1
+                trade_log.append({
+                    "Date": trade_dt, "Specialist": spec["name"], "Market": title,
+                    "Outcome": outcome, "Price": price,
+                    "Action": f"EXIT → {'PROFIT' if pnl >= 0 else 'LOSS'}",
+                    "Bet": held["bet_size"], "P&L": pnl, "Balance": balance,
+                })
+                del open_positions[collision_key]
+                equity_curve.append((trade_dt, balance + pending_exposure + harvested_total))
+            continue
+
+        # --- BUY handling ---
 
         # 1. Collision check
-        collision_key = f"{event_slug}:{outcome}"
-        if collision_key in seen_slugs:
+        if collision_key in open_positions:
             stats["skipped_collision"] += 1
-            trade_log.append({"Date": trade_dt, "Specialist": spec["name"], "Market": title, "Outcome": outcome, "Price": price, "Action": "SKIP: Collision", "P&L": 0, "Balance": balance})
+            trade_log.append({"Date": trade_dt, "Specialist": spec["name"], "Market": title,
+                "Outcome": outcome, "Price": price,
+                "Action": f"SKIP: Collision ({fill_count} fills)", "P&L": 0, "Balance": balance})
             continue
 
-        # 2. Tag matching — use full event info with tag group expansion
+        # 2. Tag matching — optional
         event_info = _lookup_event_info(event_slug) if event_slug else {"tags": [], "end_date": "", "markets": []}
         market_tags = event_info["tags"]
-        expanded_spec_tags = _expand_tags(spec["tags"])
         matched_tag = None
-        for tag in market_tags:
-            if tag in expanded_spec_tags:
-                matched_tag = tag
-                break
-        if market_tags and matched_tag is None:
-            tag_names = [TAG_MAP.get(t, t) for t in market_tags[:3]]
-            stats["skipped_tag"] += 1
-            trade_log.append({"Date": trade_dt, "Specialist": spec["name"], "Market": title, "Outcome": outcome, "Price": price, "Action": f"SKIP: Tag mismatch ({', '.join(tag_names)})", "P&L": 0, "Balance": balance})
-            continue
-        if not market_tags:
-            matched_tag = spec["tags"][0] if spec["tags"] else "1"
 
-        # 3. Value cap
-        max_price = FinanceController.get_max_price_for_tag(matched_tag)
-        if price > max_price:
+        if enable_tag_filter:
+            expanded_spec_tags = _expand_tags(spec["tags"])
+            for tag in market_tags:
+                if tag in expanded_spec_tags:
+                    matched_tag = tag
+                    break
+            if market_tags and matched_tag is None:
+                tag_names = [TAG_MAP.get(t, t) for t in market_tags[:3]]
+                stats["skipped_tag"] += 1
+                trade_log.append({"Date": trade_dt, "Specialist": spec["name"], "Market": title,
+                    "Outcome": outcome, "Price": price,
+                    "Action": f"SKIP: Tag mismatch ({', '.join(tag_names)})", "P&L": 0, "Balance": balance})
+                continue
+
+        # Pick a tag for fee estimation (first market tag, or specialist's primary)
+        if matched_tag is None:
+            matched_tag = market_tags[0] if market_tags else (spec["tags"][0] if spec["tags"] else "1")
+
+        # 3. Value cap (using sidebar-configurable cap)
+        if price > max_price_cap:
             stats["skipped_price"] += 1
-            trade_log.append({"Date": trade_dt, "Specialist": spec["name"], "Market": title, "Outcome": outcome, "Price": price, "Action": f"SKIP: Price ${price:.2f} > cap ${max_price:.2f}", "P&L": 0, "Balance": balance})
+            trade_log.append({"Date": trade_dt, "Specialist": spec["name"], "Market": title,
+                "Outcome": outcome, "Price": price,
+                "Action": f"SKIP: Price ${price:.2f} > cap ${max_price_cap:.2f}",
+                "P&L": 0, "Balance": balance})
             continue
 
-        # 4. Date filter — use end date from Gamma API
+        # 4. Date filter
         end_date_str = event_info.get("end_date", "")
         if end_date_str:
             try:
@@ -1059,7 +1226,10 @@ def render_historical_backtest(db):
                 if days_out > max_days:
                     stats["skipped_date"] += 1
                     cat = "Sports" if is_sports else "Other"
-                    trade_log.append({"Date": trade_dt, "Specialist": spec["name"], "Market": title, "Outcome": outcome, "Price": price, "Action": f"SKIP: {days_out}d out > {max_days}d ({cat})", "P&L": 0, "Balance": balance})
+                    trade_log.append({"Date": trade_dt, "Specialist": spec["name"], "Market": title,
+                        "Outcome": outcome, "Price": price,
+                        "Action": f"SKIP: {days_out}d out > {max_days}d ({cat})",
+                        "P&L": 0, "Balance": balance})
                     continue
             except ValueError:
                 pass
@@ -1067,13 +1237,25 @@ def render_historical_backtest(db):
         # 5. Buffer check
         if balance < min_buffer:
             stats["skipped_buffer"] += 1
-            trade_log.append({"Date": trade_dt, "Specialist": spec["name"], "Market": title, "Outcome": outcome, "Price": price, "Action": "SKIP: Low balance", "P&L": 0, "Balance": balance})
+            trade_log.append({"Date": trade_dt, "Specialist": spec["name"], "Market": title,
+                "Outcome": outcome, "Price": price,
+                "Action": "SKIP: Low balance", "P&L": 0, "Balance": balance})
             continue
 
-        # 6. Size the bet
+        # 6. Size the bet — conviction-aware
         tier = spec.get("tier", "SHARP")
-        win_rate = 50.0  # Use neutral for historical (no prior bot data)
-        bet_size = FinanceController.calculate_bet_size(balance, tier, win_rate)
+        win_rate = 50.0
+        avg_size = spec_avg_size.get(spec["name"], 0)
+        bet_size = FinanceController.calculate_conviction_size(
+            balance, tier, win_rate, spec_position_size, avg_size)
+
+        if bet_size <= 0:
+            stats["skipped_conviction"] += 1
+            trade_log.append({"Date": trade_dt, "Specialist": spec["name"], "Market": title,
+                "Outcome": outcome, "Price": price,
+                "Action": "SKIP: Low conviction (small bet)", "P&L": 0, "Balance": balance})
+            continue
+
         available = balance - min_buffer
         if bet_size > available:
             bet_size = available
@@ -1084,36 +1266,38 @@ def render_historical_backtest(db):
         # Fee
         fee = bet_size * FinanceController.estimate_taker_fee(price, matched_tag)
 
-        # Determine outcome from Gamma API market resolution data
-        # Check if the market is closed and who won via outcomePrices
+        # Determine outcome from Gamma API resolution data
         trade_result = _resolve_trade(event_info, title, outcome, trade_dt)
 
-        seen_slugs.add(collision_key)
+        # Track the position
+        open_positions[collision_key] = {"bet_size": bet_size, "price": price, "tag": matched_tag}
         stats["copied"] += 1
 
-        # Simulate real wallet: USDC leaves on buy, comes back on win
-        balance -= (bet_size + fee)  # Pay for shares + fee upfront
+        # Simulate real wallet: USDC leaves on buy
+        balance -= (bet_size + fee)
 
         if trade_result == "WON":
-            payout = bet_size / price  # Shares pay out $1 each
+            payout = bet_size / price
             balance += payout
             pnl = payout - bet_size - fee
             stats["won"] += 1
             action = "WON"
+            if collision_key in open_positions:
+                del open_positions[collision_key]
         elif trade_result == "LOST":
-            pnl = -(bet_size + fee)  # Already deducted above
+            pnl = -(bet_size + fee)
             stats["lost"] += 1
             action = "LOST"
+            if collision_key in open_positions:
+                del open_positions[collision_key]
         else:
-            # Capital is locked in shares — track it as unrealized value
-            pending_exposure += bet_size  # Shares still have value (at entry price)
-            pnl = -fee  # Only the fee is a definite loss so far
+            pending_exposure += bet_size
+            pnl = -fee
             stats["pending"] += 1
             action = "PENDING"
 
         balance = max(0.0, balance)
 
-        # Harvest checks against liquid balance only (not pending shares)
         if enable_harvest:
             result = FinanceController.check_harvest(balance, baseline)
             if result.triggered:
@@ -1121,13 +1305,20 @@ def render_historical_backtest(db):
                 balance = result.new_balance
                 baseline = result.new_baseline
 
-        # Equity = cash + pending shares value + harvested
+        conviction_label = ""
+        if avg_size > 0 and spec_position_size > 0:
+            ratio = spec_position_size / avg_size
+            if ratio >= 2.0:
+                conviction_label = " [HIGH]"
+            elif ratio < 0.5:
+                conviction_label = " [low]"
+
         equity_curve.append((trade_dt, balance + pending_exposure + harvested_total))
         trade_log.append({
             "Date": trade_dt, "Specialist": spec["name"], "Market": title,
             "Outcome": outcome, "Price": price,
-            "Action": f"COPIED → {action}", "Bet": bet_size,
-            "P&L": pnl, "Balance": balance,
+            "Action": f"COPIED → {action}{conviction_label} ({fill_count} fills)",
+            "Bet": bet_size, "P&L": pnl, "Balance": balance,
         })
 
     progress.empty()
@@ -1170,13 +1361,14 @@ def _render_historical_results(trade_log, equity_curve, stats, bankroll, final_b
     col4.metric("Win Rate", f"{win_rate:.0f}%" if total_resolved > 0 else "N/A")
 
     col5, col6, col7, col8 = st.columns(4)
-    col5.metric("Won", stats["won"])
+    sold = stats.get("sold", 0)
+    col5.metric("Won" + (f" ({sold} exits)" if sold else ""), stats["won"])
     col6.metric("Lost", stats["lost"])
     col7.metric(f"Pending (${pending_exposure:.2f} in shares)", stats["pending"])
     if enable_harvest:
         col8.metric("Harvested", f"${harvested_total:.2f}")
     else:
-        total_skipped = stats["skipped_tag"] + stats["skipped_price"] + stats["skipped_buffer"] + stats["skipped_collision"] + stats["skipped_date"]
+        total_skipped = stats.get("skipped_tag", 0) + stats["skipped_price"] + stats["skipped_buffer"] + stats["skipped_collision"] + stats["skipped_date"] + stats.get("skipped_conviction", 0)
         col8.metric("Total Skipped", total_skipped)
 
     st.markdown("---")
@@ -1194,10 +1386,16 @@ def _render_historical_results(trade_log, equity_curve, stats, bankroll, final_b
 
     # --- Filter Breakdown ---
     st.subheader("Trade Filter Breakdown")
-    filter_data = {
-        "Filter": ["Copied", "Tag Mismatch", "Price > Value Cap", "Date Too Far Out", "Collision (Duplicate)", "Low Balance"],
-        "Count": [stats["copied"], stats["skipped_tag"], stats["skipped_price"], stats["skipped_date"], stats["skipped_collision"], stats["skipped_buffer"]],
-    }
+    filters = ["Copied", "Collision", "Price > Cap", "Tag Mismatch", "Date Too Far", "Low Conviction", "Low Balance"]
+    counts = [stats["copied"], stats["skipped_collision"], stats["skipped_price"],
+              stats.get("skipped_tag", 0), stats["skipped_date"],
+              stats.get("skipped_conviction", 0), stats["skipped_buffer"]]
+    # Only show non-zero filters
+    filter_data = {"Filter": [], "Count": []}
+    for f, c in zip(filters, counts):
+        if c > 0:
+            filter_data["Filter"].append(f)
+            filter_data["Count"].append(c)
     filter_df = pd.DataFrame(filter_data)
     col_chart, col_table = st.columns([2, 1])
     with col_chart:
@@ -1211,13 +1409,14 @@ def _render_historical_results(trade_log, equity_curve, stats, bankroll, final_b
     st.subheader("Per-Specialist Performance")
     if trade_log:
         log_df = pd.DataFrame(trade_log)
-        copied = log_df[log_df["Action"].str.startswith("COPIED")]
-        if not copied.empty:
+        # Match both COPIED and EXIT actions for per-specialist stats
+        acted = log_df[log_df["Action"].str.startswith(("COPIED", "EXIT"))]
+        if not acted.empty:
             spec_stats = []
-            for name, group in copied.groupby("Specialist"):
-                wins = (group["Action"] == "COPIED → WON").sum()
-                losses = (group["Action"] == "COPIED → LOST").sum()
-                pending = (group["Action"] == "COPIED → PENDING").sum()
+            for name, group in acted.groupby("Specialist"):
+                wins = group["Action"].str.contains("WON|PROFIT").sum()
+                losses = group["Action"].str.contains("LOST|LOSS").sum()
+                pending = group["Action"].str.contains("PENDING").sum()
                 total_pnl = group["P&L"].sum()
                 resolved = wins + losses
                 wr = (wins / resolved * 100) if resolved > 0 else 0
@@ -1288,10 +1487,12 @@ def _render_save_view_hb(result_data):
                     "lost": s["lost"],
                     "pending": s["pending"],
                     "win_rate": win_rate,
-                    "skipped_tag": s["skipped_tag"],
+                    "skipped_tag": s.get("skipped_tag", 0),
                     "skipped_price": s["skipped_price"],
                     "skipped_date": s["skipped_date"],
                     "skipped_collision": s["skipped_collision"],
+                    "skipped_conviction": s.get("skipped_conviction", 0),
+                    "sold": s.get("sold", 0),
                     "harvested": result_data["harvested_total"],
                 },
             }
@@ -1317,19 +1518,19 @@ def _render_saved_hb_comparison():
             "View": v["name"],
             "Bankroll": f"${p.get('bankroll', 0):.0f}",
             "Lookback": f"{p.get('lookback_days', 0)}d",
-            "Sports Max": f"{p.get('max_days_sports', 0)}d",
-            "Other Max": f"{p.get('max_days_other', 0)}d",
-            "Specialists": len(p.get("selected", [])),
-            "Final Value": f"${m['final_value']:.2f}",
+            "Cap": f"{p.get('max_price_cap', 0.82):.0%}",
+            "Tags": "ON" if p.get("enable_tag_filter") else "OFF",
+            "Agg": "ON" if p.get("enable_fill_aggregation", True) else "OFF",
+            "Exit Copy": "ON" if p.get("enable_exit_copy", True) else "OFF",
+            "Specs": len(p.get("selected", [])),
+            "Final $": f"${m['final_value']:.2f}",
             "ROI": f"{m['roi']:+.1f}%",
             "Copied": m["copied"],
             "Won": m["won"],
             "Lost": m["lost"],
             "Pending": m["pending"],
-            "Win Rate": f"{m['win_rate']:.0f}%",
-            "Tag Skip": m["skipped_tag"],
-            "Price Skip": m["skipped_price"],
-            "Date Skip": m["skipped_date"],
+            "Sold": m.get("sold", 0),
+            "Win %": f"{m['win_rate']:.0f}%",
             "Harvested": f"${m['harvested']:.2f}",
         })
 

@@ -97,31 +97,76 @@ class FinanceController:
     @staticmethod
     def get_max_price_for_tag(tag_id: str) -> float:
         """
-        Adaptive "Value Caps".
-        Returns the maximum acceptable entry price based on the sport tag.
+        Adaptive "Value Caps" — max entry price by category.
+
+        Raised to 0.82 for most categories based on pro copy-trading research:
+        - Previous caps (0.55-0.65) filtered out specialists' high-conviction
+          trades where they actually had edge.
+        - Pro services (Polycule, PolyCop) typically cap at 0.80-0.85.
+        - Only filter truly extreme prices (0.90+) where implied probability
+          leaves almost no edge for the copy-trader.
         """
-        # Dictionary mapping Tag IDs to Max Prices
         tag_limits = {
-            "745": 0.55,      # NBA
-            "28": 0.55,       # Basketball
-            "100350": 0.60,   # Soccer
-            "100977": 0.60,   # UCL
-            "306": 0.60,      # EPL
-            "82": 0.60,       # Premier League
-            "100381": 0.65,   # MLB
-            "678": 0.65,      # baseball
-            "899": 0.65,      # NHL
-            "100088": 0.65,   # Hockey
-            "100089": 0.65,   # Stanley Cup
-            "64": 0.65,       # Esports
-            "2": 0.55,        # Politics (High Volatility)
-            "144": 0.55,      # Elections
-            "100265": 0.55,   # Geopolitics
-            "1": 0.60,        # Sports (generic)
-            "100639": 0.60,   # Games (generic)
+            "745": 0.82,      # NBA
+            "28": 0.82,       # Basketball
+            "100350": 0.82,   # Soccer
+            "100977": 0.82,   # UCL
+            "306": 0.82,      # EPL
+            "82": 0.82,       # Premier League
+            "100381": 0.82,   # MLB
+            "678": 0.82,      # baseball
+            "899": 0.82,      # NHL
+            "100088": 0.82,   # Hockey
+            "100089": 0.82,   # Stanley Cup
+            "64": 0.82,       # Esports
+            "102366": 0.82,   # Dota 2
+            "2": 0.75,        # Politics (higher volatility, tighter cap)
+            "144": 0.75,      # Elections
+            "100265": 0.75,   # Geopolitics
+            "1": 0.82,        # Sports (generic)
+            "100639": 0.82,   # Games (generic)
         }
-        
-        return tag_limits.get(str(tag_id), 0.50)  # Default fallback 0.50
+
+        return tag_limits.get(str(tag_id), 0.75)  # Default fallback 0.75
+
+    @staticmethod
+    def calculate_conviction_size(current_balance: float, tier: str,
+                                  win_rate: float, specialist_size: float,
+                                  specialist_avg_size: float) -> float:
+        """
+        Conviction-aware position sizing.
+
+        Uses the specialist's bet size relative to their average as a conviction
+        signal. When they bet big (relative to their own history), we size up.
+        When they bet small (noise/hedging), we size down or skip.
+
+        conviction_ratio = specialist_size / specialist_avg_size
+            < 0.3  → skip (likely noise/hedge)
+            0.3-1  → normal sizing
+            1-3    → 1.0-1.5x multiplier
+            3+     → 1.5x cap (don't overweight outliers)
+
+        Falls back to standard calculate_bet_size if no specialist data.
+        """
+        base_bet = FinanceController.calculate_bet_size(current_balance, tier, win_rate)
+
+        if specialist_avg_size <= 0 or specialist_size <= 0:
+            return base_bet
+
+        ratio = specialist_size / specialist_avg_size
+
+        if ratio < 0.3:
+            return 0.0  # Skip — too small, likely noise
+
+        if ratio <= 1.0:
+            multiplier = 1.0  # Normal conviction
+        elif ratio <= 3.0:
+            # Linear scale from 1.0x to 1.5x
+            multiplier = 1.0 + 0.25 * (ratio - 1.0)
+        else:
+            multiplier = 1.5  # Cap at 1.5x
+
+        return base_bet * multiplier
 
     @staticmethod
     def is_slippage_acceptable(specialist_price: float, current_market_price: float) -> bool:

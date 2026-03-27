@@ -76,10 +76,13 @@ def expand_tags(tags: list[str]) -> set[str]:
             expanded |= group
     return expanded
 
-# Sports tags get 30-day window; everything else gets 14-day window
+# Strategy configuration — can be overridden via environment variables
+ENABLE_TAG_FILTER = os.environ.get("ENABLE_TAG_FILTER", "false").lower() == "true"
+MAX_DAYS_SPORTS = int(os.environ.get("MAX_DAYS_SPORTS", "60"))
+MAX_DAYS_DEFAULT = int(os.environ.get("MAX_DAYS_DEFAULT", "90"))
+
+# Sports tags for date filter categorization
 SPORTS_TAGS = {"745", "28", "100350", "100977", "306", "82", "100381", "678", "899", "100088", "100089", "1", "100639", "64", "102366"}
-MAX_DAYS_SPORTS = 30   # Catches playoff series, multi-round tournaments
-MAX_DAYS_DEFAULT = 14  # Politics, Tech, Pop Culture — short-term events only
 
 # USDC contract on Polygon (PoS bridged)
 USDC_CONTRACT = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
@@ -485,25 +488,30 @@ class PolymarketBot:
                                         except ValueError:
                                             pass
                                     
-                                    # Find the best matching tag between market and specialist
-                                    # Use tag group expansion so related tags (e.g. Soccer ↔ EPL) match
+                                    # Find the best matching tag for fee estimation and value caps.
+                                    # Tag filtering is OFF by default — copy everything the specialist trades.
+                                    # Set ENABLE_TAG_FILTER=true to only copy within assigned categories.
                                     expanded_spec_tags = expand_tags(spec.target_tags)
                                     matched_tag = None
                                     for tag in market_tags:
                                         if tag in expanded_spec_tags:
                                             matched_tag = tag
                                             break
-                                    
-                                    # Fallback: if no tags found from API, use specialist's primary domain
+
                                     if matched_tag is None and not market_tags:
-                                        matched_tag = spec.target_tags[0] if spec.target_tags else "100381"
+                                        matched_tag = spec.target_tags[0] if spec.target_tags else "1"
                                         logging.debug(f"Tag API unavailable for {slug}, using fallback tag {matched_tag}")
                                     elif matched_tag is None:
-                                        # Market has tags but none match specialist's domain — skip
-                                        self.seen_positions.add(pos_id)
-                                        tag_names = [TAG_MAP.get(t, t) for t in market_tags[:3]]
-                                        logging.info(f"⛔ TAG MISMATCH {spec.name} | {market} | Market tags: {tag_names}")
-                                        continue
+                                        if ENABLE_TAG_FILTER:
+                                            # Strict mode: skip trades outside specialist's domain
+                                            self.seen_positions.add(pos_id)
+                                            tag_names = [TAG_MAP.get(t, t) for t in market_tags[:3]]
+                                            logging.info(f"⛔ TAG MISMATCH {spec.name} | {market} | Market tags: {tag_names}")
+                                            continue
+                                        else:
+                                            # Copy-all mode: use first market tag for sizing/fees
+                                            matched_tag = market_tags[0] if market_tags else "1"
+                                            logging.debug(f"Tag mismatch but copying anyway: {spec.name} | {market}")
                                     
                                     # Get real market price from CLOB for slippage check
                                     # leader_price = specialist's avgPrice (what they paid)

@@ -36,17 +36,45 @@ def run_tests():
     assert res.new_balance == 75.0
     assert res.new_baseline == 75.0
 
-    # 4. Test Adaptive Value Caps
+    # 4. Test Adaptive Value Caps (raised to 0.82 for sports, 0.75 for politics)
     print("\n--- Testing Adaptive Value Caps ---")
     nba_cap = FinanceController.get_max_price_for_tag("745")
     soccer_cap = FinanceController.get_max_price_for_tag("100350")
     mlb_cap = FinanceController.get_max_price_for_tag("100381")
+    politics_cap = FinanceController.get_max_price_for_tag("2")
+    default_cap = FinanceController.get_max_price_for_tag("unknown_tag")
     print(f"NBA Max Entry Price: {nba_cap}")
     print(f"Soccer Max Entry Price: {soccer_cap}")
     print(f"MLB Max Entry Price: {mlb_cap}")
-    assert nba_cap == 0.55
-    assert soccer_cap == 0.60
-    assert mlb_cap == 0.65
+    print(f"Politics Max Entry Price: {politics_cap}")
+    print(f"Default Max Entry Price: {default_cap}")
+    assert nba_cap == 0.82, f"Expected 0.82, got {nba_cap}"
+    assert soccer_cap == 0.82, f"Expected 0.82, got {soccer_cap}"
+    assert mlb_cap == 0.82, f"Expected 0.82, got {mlb_cap}"
+    assert politics_cap == 0.75, f"Expected 0.75, got {politics_cap}"
+    assert default_cap == 0.75, f"Expected 0.75, got {default_cap}"
+
+    # 4b. Test Conviction-Based Sizing
+    print("\n--- Testing Conviction-Based Sizing ---")
+    # Normal conviction (ratio = 1.0) → same as base bet
+    normal = FinanceController.calculate_conviction_size(100.0, 'SHARP', 50.0, 500.0, 500.0)
+    print(f"Normal conviction (1.0x avg): ${normal:.2f} | Expected: $5.00")
+    assert normal == 5.0, f"Expected 5.0, got {normal}"
+
+    # High conviction (ratio = 3.0) → 1.5x base bet
+    high = FinanceController.calculate_conviction_size(100.0, 'SHARP', 50.0, 1500.0, 500.0)
+    print(f"High conviction (3.0x avg): ${high:.2f} | Expected: $7.50")
+    assert high == 7.5, f"Expected 7.5, got {high}"
+
+    # Low conviction (ratio = 0.2) → skip (returns 0)
+    low = FinanceController.calculate_conviction_size(100.0, 'SHARP', 50.0, 100.0, 500.0)
+    print(f"Low conviction (0.2x avg): ${low:.2f} | Expected: $0.00")
+    assert low == 0.0, f"Expected 0.0, got {low}"
+
+    # No specialist data → falls back to normal
+    fallback = FinanceController.calculate_conviction_size(100.0, 'SHARP', 50.0, 0, 0)
+    print(f"No data fallback: ${fallback:.2f} | Expected: $5.00")
+    assert fallback == 5.0, f"Expected 5.0, got {fallback}"
 
     # 5. Test Liquidity Check
     print("\n--- Testing Order Book Liquidity Check ---")
