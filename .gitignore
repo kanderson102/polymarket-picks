@@ -36,5 +36,6 @@ venv/
 # Internal docs / PRD
 docs/
 OVERVIEW.md
-architecture.md
-strategy.md
+
+# Claude Code local config (not relevant to contributors)
+.claude/

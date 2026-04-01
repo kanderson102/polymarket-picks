@@ -1,142 +1,164 @@
-# 📈 Polymarket Copy-Bot: Master Strategy & SOP
+# 📈 Polymarket Copy-Bot: Strategy & SOP
 
-This document is the "source of truth" for the Polymarket Copy-Bot's custom financial logic and tracking mechanisms. Any future AI agent or developer jumping into this project should read this document directly to understand how the bot scales, defends against risk, and categorizes traders.
-
----
-
-## 1. Categorization & Sizing (The Fractional Kelly Model)
-
-Applying a flat 5% bet size across the board is a guaranteed way to bleed capital. The bot solves this by segregating traders into two distinct Tiers:
-
-### A. The SHARP Tier (Grinders)
-These are data-driven quants. They aim for consistent profitability over thousands of trades.
-*   **Base Allocation:** `5%` of the total portfolio (Phase 1-2). Scale to `1%` at Phase 3 ($1000+).
-*   **Minimum Win Rate:** `55%`. (If they drop below this, they are instantly placed on Probation and skipped).
-*   **Identification:** Look for traders with >500 positions placed, an equity curve that steadily marches up-and-to-the-right over time, and win rates rigidly locked between 55% - 65%.
-
-### B. The WHALE Tier (Yield Farmers / High-Upside / Long-shots)
-Whales fall into two extremes: 
-1. The **Long-Shot Hunter** (bets $0.10 to win $1.00 on massive underdogs).
-2. The **Clear-Win Farmer** (bets $0.90 to win $1.00 on near-guaranteed outcomes). 
-Both have extreme variance. If a Long-Shot Hunter hits 40% of their trades, they are massively profitable. If a Clear-Win Farmer hits 90%, they are barely profitable.
-*   **Base Allocation:** `3%` of the total portfolio (Phase 1-2). Scale to `2%` at Phase 3.
-*   **Minimum Win Rate:** `40%`. (To accommodate Long-Shot math logic).
-
-### 🌟 Dynamic Capital Re-Balancing
-*Built into `finance.py -> calculate_bet_size()`*
-If a trader logs a `75%` lifetime win rate in the database, the bot mathematically scales their future bet allocation up dynamically by `1.5x` (75/50).
+This document is the source of truth for the bot's financial logic, risk rules, and specialist-vetting workflow. Read this before touching `finance.py`, `bot.py`, or the Settings page.
 
 ---
 
-## 2. Active Risk Guardrails
+## 1. Trader Tiers & Bet Sizing
 
-*   **The "No Chase" Limit (Slippage):** The bot queries the CLOB order book for the current best ask price and compares it to the specialist's entry price (`avgPrice`). If the market price is more than **2.5%** higher, the bot triggers a `TEMPORARY_REJECT` and waits for the price to come back down.
-*   **Collision Detection:** The bot actively scans your SQL database for `PENDING` active positions. Overlapping/Opposing orders are aborted instantly.
-*   **Adaptive Value Caps:** Certain categories are naturally priced higher. The bot enforces strict limits on how much it is willing to pay per share.
-    *   `Tech:` Max $0.90 (Supports Clear-Win strategies natively found in Tech markets).
-    *   `Pop Culture:` Max $0.60
-    *   `Sports:` Max $0.65
-    *   `Politics:` Max $0.55 (Due to extreme volatility and inaccurate polling).
-*   **Order Book Depth Check:** Before executing any trade, the bot queries the CLOB order book to verify sufficient liquidity exists (at least 2× the bet size across top 3 price levels). This prevents slippage on larger positions.
-*   **Auto-Resolution:** The bot automatically checks all PENDING trades each polling cycle against the Gamma API. When a market resolves, trades are marked WON or LOST with Telegram notifications including P&L.
-*   **Win Rate Bootstrapping:** New traders with <5 resolved trades default to a 50% win rate (neutral 1.0x multiplier). Untested traders do NOT get outsized bets.
+All copied traders are classified into one of two tiers. Tier determines the base bet percentage and minimum win rate threshold.
 
-### Smart Date Filter (Liquidity Protection)
-To prevent long-term capital lockup while still catching multi-week events:
+### SHARP Tier — Consistent Grinders
+Quant-style traders with high trade volume and tight, data-driven win rates.
 
-| Category | Max Days | Rationale |
-|----------|----------|-----------|
-| Sports (NBA, Soccer, MLB, NHL, Tennis, NCAAM) | 30 days | Covers playoff series & tournaments; rejects season/championship futures |
-| Politics, Tech, Pop Culture | 14 days | Short-term events only; blocks election cycles & long-term bets |
-| Default / Unknown | 14 days | Conservative fallback |
+| Balance Range | Base Bet % |
+|---------------|-----------|
+| < $200 | 5% |
+| $200 – $999 | 3% |
+| ≥ $1,000 | 1.5% |
 
-### Polymarket Fee Schedule
-Polymarket uses a **maker-taker** fee model. As a taker (market buy/sell), fees are dynamic based on share price — peaking at 50¢ and tapering to zero near 0¢/100¢. **No separate gas fees** on Polygon L2.
+- **Minimum Win Rate:** 55% (configurable in Settings)
+- **Target profile:** 500+ lifetime positions, steady upward equity curve, win rate between 55–65%
 
-| Category | Peak Fee Rate | Notes |
-|----------|---------------|-------|
-| Sports | 0.75% | Cheapest; was 0.44% pre-March 30 |
-| Politics / Tech | 1.00% | |
-| Pop Culture | 1.25% | |
-| Crypto | 1.80% | We don't trade crypto |
-| Geopolitical | 0% | Permanently fee-free |
+### WHALE Tier — High-Variance Specialists
+Traders operating at price extremes — either deep underdogs or near-certain outcomes.
 
-At Phase 1 bet sizes ($1–3), fees are ~$0.01–0.03 per trade. Tracked in Telegram notifications.
+| Balance Range | Base Bet % |
+|---------------|-----------|
+| < $200 | 3% |
+| $200 – $999 | 2% |
+| ≥ $1,000 | 1% |
+
+- **Minimum Win Rate:** 40% (configurable in Settings — accounts for long-shot math)
+- **Target profile:** Traders betting sub-0.20 or over-0.80 consistently with positive EV
+
+### Dynamic Scaling (Win Rate Multiplier)
+`finance.py → calculate_bet_size()`
+
+Bet size is scaled by a live win rate multiplier: `actual_win_rate / 50`. A specialist with a 75% lifetime win rate gets a 1.5× bet multiplier. Traders with fewer than 5 resolved trades default to a 1.0× multiplier (neutral — no outsized bets on unproven history).
+
+> All bet percentages and thresholds are configurable from the **Settings** page — no code changes required.
 
 ---
 
-## 3. Architecture: Trade Detection
+## 2. Risk Guardrails
 
-The bot uses a **dual-layer detection system**:
+### Slippage Guard (No-Chase Rule)
+The bot compares the specialist's entry price (`avgPrice`) against the current CLOB best ask. If the market has moved more than **2.5%** above the specialist's price, the bot logs a `TEMPORARY_REJECT` and skips the trade rather than chasing. Configurable via `slippage_threshold_pct` in Settings.
+
+### Value Caps by Category
+To prevent overpaying on near-certain outcomes:
+
+| Category | Max Entry Price |
+|----------|----------------|
+| Sports | 0.82 |
+| Politics | 0.75 |
+
+Configurable via `value_cap_sports` and `value_cap_politics` in Settings. Markets priced above these thresholds are skipped.
+
+### Date Filter (Liquidity Protection)
+Prevents capital from being locked in long-duration markets:
+
+| Category | Max Days to Close |
+|----------|------------------|
+| Sports (NBA, Soccer, MLB, NHL, etc.) | 60 days |
+| Everything else | 90 days |
+
+Configurable via `max_days_sports` and `max_days_default` in Settings.
+
+### Collision Detection
+Before placing any trade, the bot scans for existing `PENDING` positions in the same market. Duplicate or opposing positions are aborted immediately.
+
+### Order Book Depth Check
+The bot checks CLOB liquidity before executing. If the top 3 price levels don't cover at least **2× the bet size**, the trade is skipped. Configurable via `liquidity_multiple` in Settings.
+
+### Win Rate Bootstrapping
+New traders with fewer than 5 resolved trades are treated as 50% win rate (1.0× multiplier). The bot does not make outsized bets on unproven specialists.
+
+---
+
+## 3. Trade Detection Architecture
 
 ### Primary: WebSocket Listener (`ws_listener.py`)
-*   Connects to `wss://ws-subscriptions-clob.polymarket.com/ws/market`
-*   Sub-second latency for detecting specialist trades
-*   Auto-reconnects with exponential backoff (5s, 10s, 20s...)
-*   **Circuit breaker:** After 50 rapid reconnect loops, backs off to 5-minute intervals (prevents log spam)
-*   **Stable-connection reset:** Only resets reconnect counter after connection is stable for 30+ seconds
-*   **Log deduplication:** Suppresses repeated identical WS error messages
-*   Sends Telegram alert after 5 failed reconnection attempts
-*   Falls back to HTTP polling when disconnected
+- Connects to `wss://ws-subscriptions-clob.polymarket.com/ws/market`
+- Sub-second latency for detecting specialist trades
+- Auto-reconnects with exponential backoff (5s → 10s → 20s...)
+- Circuit breaker: after 50 rapid reconnect loops, backs off to 5-minute intervals
+- Resets reconnect counter after 30+ seconds of stable connection
+- Sends Telegram alert after 5 consecutive failed reconnection attempts
 
-### Fallback: HTTP Polling (30s)
-*   Polls the Polymarket Data API every 30 seconds
-*   Acts as safety net when WebSocket is disconnected
-*   Also handles auto-resolution checks
+### Fallback: HTTP Polling
+- Polls the Polymarket Data API every 30 seconds (configurable via `poll_interval` in Settings)
+- Catches any trades missed during WebSocket gaps
+- Also handles auto-resolution checks each cycle
 
 ### Tag Matching
-The bot cross-references the Gamma API (`/events?slug=X`) to get real market tags instead of assuming the specialist only trades in their assigned domain. If the market's actual tags don't match the specialist's allowed tags, the trade is rejected with a `TAG MISMATCH` log.
+The bot cross-references the Gamma API (`/events?slug=X`) to get actual market tags for each trade. If the market's tags don't match the specialist's allowed categories, the trade is rejected with a `TAG MISMATCH` log.
 
-### Real Wallet Balance
-The bot queries your actual USDC balance on Polygon via Alchemy RPC (`get_wallet_balance()`) instead of using a hardcoded value. The balance is cached for 60 seconds and used for position sizing, exposure calculations, and Telegram summaries.
-
-### Log Rotation
-Logs use `RotatingFileHandler` with 5MB max file size and 3 backup files (15MB total max).
+### Market Auto-Resolution
+Each polling cycle, the bot checks all `PENDING` trades against the Gamma API. Resolved markets are marked `WON` or `LOST` with P&L calculated and a Telegram notification sent.
 
 ---
 
-## 4. Discovery & Vetting Protocol (SOP for the User & Future AI)
+## 4. Harvest Logic
 
-Finding *net-new* traders requires manual discovery. This is the exact step-by-step workflow:
+When the wallet balance hits **2×** the baseline (configurable via `harvest_trigger_multiplier`), the bot flags a harvest event. **50%** of profits above baseline are earmarked for transfer to the harvest wallet (configurable via `harvest_transfer_pct`). A minimum buffer (`min_wallet_buffer`, default $5) is always maintained so the bot never runs dry.
 
-**Step 1: Finding Talent on Analytical platforms (Polymarket Analytics or Native Polymarket Leaderboards)**
-1. Navigate to Polymarket's native Leaderboard, or `polymarketanalytics.com` / `polytrack.net`. 
-2. Change the sorting filter from "All-Time PnL" to **"30-Day PnL"** or **"Win Rate"**. (All-Time PnL is usually dominated by one-hit-wonder Crypto arbers).
-3. If using Polymarket Analytics, look for the **Window Consistency Score**. You want traders with positive, steady window consistency, not a single massive spike on their chart.
-4. **Filter by category** (Sports, Politics, etc.) to find domain-specific specialists.
-
-**Step 2: Category Verification (CRITICAL)**
-*Never* add a trader strictly because of their global PnL. 
-1. Open the prospect's profile.
-2. Filter their history or tags specifically by the Category you want to track (e.g., filter their positions exclusively to "Sports" or "Pop Culture").
-3. Do they have a proven `>55%` win curve purely in that category? If they make $5M in Crypto but are negative in Sports, **DO NOT** assign them a Sports tag on your dashboard.
-4. **Verify via API:** Query `https://data-api.polymarket.com/positions?user={wallet}` and categorize their actual trades to confirm.
-
-**Step 3: Getting the Polymarket Address vs Proxy Address**
-*   **Why did the AI mention Tracker sites for addresses?** On Polymarket Analytics, you can easily just click "Copy Address" next to a username to get their exact `0x` string. 
-*   **Can you get it from Polymarket native?** Yes! If you click on a user's name on Polymarket (e.g., `polymarket.com/@Sharky6999`), look at the URL or their profile modal. It will display their `0x...` wallet address. Copy that.
-*   **Address must be exactly 42 characters** (0x + 40 hex characters). Truncated addresses will fail silently.
-
-**Step 4: Database Injection**
-Once vetted:
-1. Go to your Streamlit Dashboard.
-2. Click **➕ Add New Trader**.
-3. Paste their Name and `0x...` Wallet Address.
-4. **Use the Dropdown Menu** to select ONLY the specific Sports/Categories they passed verification for.
-5. Select `SHARP` or `WHALE` based on the definitions above.
-6. Check the Vetting Acknowledgement box and hit Add! The bot will instantly pick them up.
+> Note: In the current paper-trading phase, harvest events are logged and Telegram-alerted but no on-chain transfer is triggered automatically.
 
 ---
 
-## 5. Current Specialist Roster (Last Verified: March 2026)
+## 5. Polymarket Fee Schedule
 
-| Trader | Tier | Domain Tags | Monthly PnL | Notes |
-|--------|------|-------------|-------------|-------|
-| S-Works | SHARP | Soccer, UCL, NBA | +$278K | Generalist, 75% Soccer |
-| reachingthesky | SHARP | Soccer, UCL | +$3.7M | #3 Sports monthly |
-| HorizonSplendidView | SHARP | Soccer, UCL | +$4.0M | #2 Sports monthly |
-| CemeterySun | SHARP | NBA, Soccer, NHL | +$1.6M | #7 Sports, high volume (100+ positions) |
-| LlamaEnjoyer | WHALE | Pop Culture | +$3.3K | Novelty markets (Elon, Fed rates) |
-| beachboy4 | SHARP | NBA, Soccer, UCL | +$4.4M | #1 Sports monthly |
-| CERTuo | SHARP | NHL | +$1.7M | 86% NHL specialist |
-| majorexploiter | SHARP | Soccer, UCL | +$2.4M | #5 Sports, EPL specialist |
+Polymarket uses a maker-taker model. As a taker, fees are dynamic based on share price — peaking around mid-market and tapering to zero near 0¢/100¢.
+
+| Category | Peak Fee Rate |
+|----------|--------------|
+| Sports | ~0.75% |
+| Politics | ~1.00% |
+| Geopolitical | 0% (fee-free) |
+
+At Phase 1 bet sizes ($1–3), fees are approximately $0.01–0.03 per trade.
+
+---
+
+## 6. Specialist Vetting SOP
+
+### Step 1: Find Candidates
+- Use [polymarketanalytics.com](https://polymarketanalytics.com) or [polytrack.net](https://polytrack.net)
+- Sort by **30-Day PnL** or **Win Rate** — not all-time PnL (dominated by one-hit-wonder arbers)
+- Look for traders with a steady upward equity curve, not a single spike
+
+### Step 2: Category Verification (Critical)
+Never add a trader based on global PnL alone.
+1. Open their profile and filter by the specific category you want to copy (Sports, Politics, etc.)
+2. Do they have a verified >55% win curve **in that category specifically**?
+3. Confirm via API: `https://data-api.polymarket.com/positions?user={wallet}`
+
+### Step 3: Get Their Wallet Address
+- On Polymarket Analytics: click "Copy Address" next to their username
+- On Polymarket native: check the URL or profile modal for their `0x...` address
+- Address must be exactly 42 characters (0x + 40 hex). Truncated addresses fail silently.
+
+### Step 4: Add via Dashboard
+1. Open the Streamlit Dashboard
+2. Click **➕ Add New Trader** in the Specialists section
+3. Paste their Name and `0x...` wallet address
+4. Select only the categories they passed verification for
+5. Select `SHARP` or `WHALE` based on the criteria above
+6. Check the vetting acknowledgement and click Add — the bot picks them up on the next polling cycle
+
+---
+
+## 7. Current Specialist Roster (Last Verified: March 2026)
+
+| Trader | Tier | Domain Tags | Notes |
+|--------|------|-------------|-------|
+| S-Works | SHARP | Soccer, UCL, NBA | Generalist, ~75% Soccer |
+| reachingthesky | SHARP | Soccer, UCL | Top-3 Sports monthly |
+| HorizonSplendidView | SHARP | Soccer, UCL | Top-3 Sports monthly |
+| CemeterySun | SHARP | NBA, Soccer, NHL | High volume, 100+ positions |
+| LlamaEnjoyer | WHALE | Pop Culture | Novelty markets |
+| beachboy4 | SHARP | NBA, Soccer, UCL | #1 Sports monthly |
+| CERTuo | SHARP | NHL | 86% NHL specialist |
+| majorexploiter | SHARP | Soccer, UCL | EPL specialist |

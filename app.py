@@ -61,150 +61,185 @@ def _init_saved_views():
 
 
 def _inject_css():
-    st.markdown("""
-<style>
-/* ── Global ─────────────────────────────────────────────────── */
-html, body, [data-testid="stAppViewContainer"] {
-    background-color: #0a0d12;
-}
-[data-testid="stMain"] > div {
-    padding-top: 0.5rem;
-}
+    dark = st.session_state.get("dark_mode", True)
 
-/* ── Gradient accent bar under page title ───────────────────── */
-h1 {
+    # ── Palette ──────────────────────────────────────────────────
+    if dark:
+        bg          = "#0a0d12"
+        bg2         = "#111720"
+        bg3         = "#0d1219"
+        border      = "#1e2d42"
+        border2     = "#1a2236"
+        text        = "#dde3ee"
+        text2       = "#c8d6ef"
+        text3       = "#9aabbf"
+        muted       = "#5c7a9a"
+        sidebar_bg  = "#080b10"
+        primary     = "#00e5a0"
+        primary_btn = "linear-gradient(135deg,#00c48a 0%,#00a0f0 100%)"
+        btn_text    = "#000"
+    else:
+        bg          = "#f4f6f9"
+        bg2         = "#ffffff"
+        bg3         = "#f0f2f5"
+        border      = "#d0dae8"
+        border2     = "#e2e8f0"
+        text        = "#1a202c"
+        text2       = "#2d3748"
+        text3       = "#4a5568"
+        muted       = "#718096"
+        sidebar_bg  = "#edf0f5"
+        primary     = "#0096c7"
+        primary_btn = "linear-gradient(135deg,#0096c7 0%,#7c3aed 100%)"
+        btn_text    = "#fff"
+
+    st.markdown(f"""
+<style>
+/* ── Global ──────────────────────────────────────────────────── */
+html, body,
+[data-testid="stAppViewContainer"],
+[data-testid="stMain"] {{
+    background-color: {bg} !important;
+    color: {text} !important;
+}}
+/* Remove the fixed Streamlit header bar that overlaps content */
+[data-testid="stHeader"] {{
+    background: {bg} !important;
+    border-bottom: 1px solid {border2} !important;
+}}
+/* Prevent content from being hidden under the header */
+.main .block-container {{
+    padding-top: 2.5rem !important;
+    max-width: 1400px !important;
+}}
+
+/* ── Typography ──────────────────────────────────────────────── */
+h1 {{
     padding-bottom: 0.5rem;
-    border-bottom: 1px solid #1a2236;
+    border-bottom: 1px solid {border2};
     letter-spacing: -0.02em;
     font-size: 1.8rem !important;
-}
-h2 { letter-spacing: -0.01em; color: #c8d6ef; }
-h3 { color: #9aabbf; font-size: 1rem !important; text-transform: uppercase; letter-spacing: 0.06em; }
+    color: {text} !important;
+}}
+h2 {{ letter-spacing: -0.01em; color: {text2} !important; }}
+h3 {{ color: {text3} !important; font-size: 0.9rem !important;
+      text-transform: uppercase; letter-spacing: 0.07em; }}
+p, li, label {{ color: {text} !important; }}
 
-/* ── Sidebar ────────────────────────────────────────────────── */
-[data-testid="stSidebar"] {
-    background: #080b10 !important;
-    border-right: 1px solid #1a2236 !important;
-}
-[data-testid="stSidebar"] .stRadio label {
-    font-size: 0.85rem;
-    letter-spacing: 0.02em;
-}
+/* ── Sidebar ─────────────────────────────────────────────────── */
+[data-testid="stSidebar"] {{
+    background: {sidebar_bg} !important;
+    border-right: 1px solid {border2} !important;
+}}
+[data-testid="stSidebar"] p,
+[data-testid="stSidebar"] label,
+[data-testid="stSidebar"] span {{
+    color: {text} !important;
+}}
 
-/* ── Metric cards ───────────────────────────────────────────── */
-[data-testid="stMetric"] {
-    background: #111720 !important;
-    border: 1px solid #1e2d42 !important;
+/* ── Metric cards ────────────────────────────────────────────── */
+[data-testid="stMetric"] {{
+    background: {bg2} !important;
+    border: 1px solid {border} !important;
     border-radius: 8px !important;
     padding: 1rem 1.2rem !important;
     transition: border-color 0.2s;
-}
-[data-testid="stMetric"]:hover {
-    border-color: #00e5a0 !important;
-}
-[data-testid="stMetricValue"] {
+}}
+[data-testid="stMetric"]:hover {{ border-color: {primary} !important; }}
+[data-testid="stMetricValue"] {{
     font-size: 1.75rem !important;
     font-weight: 700 !important;
-    color: #e2f0ff !important;
-    font-family: 'SF Mono', 'Fira Code', monospace !important;
-}
-[data-testid="stMetricLabel"] {
+    color: {text} !important;
+    font-family: 'SF Mono','Fira Code',monospace !important;
+}}
+[data-testid="stMetricLabel"] {{
     font-size: 0.7rem !important;
     text-transform: uppercase !important;
     letter-spacing: 0.08em !important;
-    color: #5c7a9a !important;
-}
-[data-testid="stMetricDelta"] svg { display: none; }
+    color: {muted} !important;
+}}
+[data-testid="stMetricDelta"] svg {{ display: none; }}
 
-/* ── Primary button ─────────────────────────────────────────── */
-.stButton > button[kind="primary"] {
-    background: linear-gradient(135deg, #00c48a 0%, #00a0f0 100%) !important;
+/* ── Primary button ──────────────────────────────────────────── */
+.stButton > button[kind="primary"] {{
+    background: {primary_btn} !important;
     border: none !important;
-    color: #000 !important;
+    color: {btn_text} !important;
     font-weight: 700 !important;
     letter-spacing: 0.04em !important;
     border-radius: 6px !important;
     padding: 0.5rem 1.4rem !important;
     transition: opacity 0.15s, transform 0.1s !important;
-}
-.stButton > button[kind="primary"]:hover {
-    opacity: 0.9 !important;
+}}
+.stButton > button[kind="primary"]:hover {{
+    opacity: 0.88 !important;
     transform: translateY(-1px) !important;
-}
+}}
 
-/* ── Secondary buttons ──────────────────────────────────────── */
+/* ── Secondary buttons ───────────────────────────────────────── */
 .stButton > button[kind="secondary"],
-.stButton > button {
-    background: #111720 !important;
-    border: 1px solid #1e2d42 !important;
-    color: #9aabbf !important;
+.stButton > button {{
+    background: {bg2} !important;
+    border: 1px solid {border} !important;
+    color: {text3} !important;
     border-radius: 6px !important;
     transition: border-color 0.15s, color 0.15s !important;
-}
-.stButton > button:hover {
-    border-color: #00e5a0 !important;
-    color: #00e5a0 !important;
-}
+}}
+.stButton > button:hover {{
+    border-color: {primary} !important;
+    color: {primary} !important;
+}}
 
-/* ── Dataframes ─────────────────────────────────────────────── */
-[data-testid="stDataFrame"] {
-    border: 1px solid #1a2236 !important;
+/* ── Dataframes ──────────────────────────────────────────────── */
+[data-testid="stDataFrame"] {{
+    border: 1px solid {border2} !important;
     border-radius: 8px !important;
     overflow: hidden !important;
-}
+}}
 
-/* ── Expanders ──────────────────────────────────────────────── */
-[data-testid="stExpander"] {
-    border: 1px solid #1a2236 !important;
+/* ── Expanders ───────────────────────────────────────────────── */
+[data-testid="stExpander"] {{
+    border: 1px solid {border2} !important;
     border-radius: 8px !important;
-    background: #0d1219 !important;
-}
+    background: {bg3} !important;
+}}
 
-/* ── Forms / inputs ─────────────────────────────────────────── */
+/* ── Inputs ──────────────────────────────────────────────────── */
 [data-testid="stTextInput"] input,
-[data-testid="stNumberInput"] input {
-    background: #0d1219 !important;
-    border-color: #1e2d42 !important;
-    color: #dde3ee !important;
-}
+[data-testid="stNumberInput"] input {{
+    background: {bg3} !important;
+    border-color: {border} !important;
+    color: {text} !important;
+}}
 
-/* ── Horizontal rule ────────────────────────────────────────── */
-hr { border-color: #1a2236 !important; }
+/* ── Horizontal rule ─────────────────────────────────────────── */
+hr {{ border-color: {border2} !important; }}
 
-/* ── View cards (saved backtest views) ──────────────────────── */
-.view-card {
-    background: #111720;
-    border: 1px solid #1e2d42;
+/* ── View cards (saved backtest views) ───────────────────────── */
+.view-card {{
+    background: {bg2};
+    border: 1px solid {border};
     border-radius: 10px;
     padding: 0.9rem 1.1rem;
     margin-bottom: 0.5rem;
     transition: border-color 0.2s;
-}
-.view-card:hover { border-color: #00e5a0; }
-.view-card-title {
-    font-size: 0.85rem;
-    font-weight: 600;
-    color: #dde3ee;
-    margin-bottom: 0.4rem;
-    letter-spacing: 0.02em;
-}
-.view-card-meta {
-    font-size: 0.72rem;
-    color: #5c7a9a;
+}}
+.view-card:hover {{ border-color: {primary}; }}
+.view-card-title {{
+    font-size: 0.85rem; font-weight: 600;
+    color: {text}; margin-bottom: 0.4rem; letter-spacing: 0.02em;
+}}
+.view-card-meta {{
+    font-size: 0.72rem; color: {muted};
     font-family: 'SF Mono', monospace;
-}
-.view-card-metric {
-    font-size: 1.1rem;
-    font-weight: 700;
+}}
+.view-card-metric {{
+    font-size: 1.1rem; font-weight: 700;
     font-family: 'SF Mono', monospace;
-}
-.pos { color: #22c55e; }
-.neg { color: #ef4444; }
-.neutral { color: #f59e0b; }
-
-/* ── Status badge ───────────────────────────────────────────── */
-.badge-live  { color: #22c55e; font-size: 0.75rem; letter-spacing: 0.08em; }
-.badge-off   { color: #5c7a9a; font-size: 0.75rem; letter-spacing: 0.08em; }
+}}
+.pos     {{ color: #22c55e; }}
+.neg     {{ color: #ef4444; }}
+.neutral {{ color: #f59e0b; }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -222,6 +257,19 @@ def main():
 
     st.sidebar.title("Navigation")
     page = st.sidebar.radio("Go to", ["Dashboard", "Backtest Simulator", "Historical Backtest", "Settings", "Controls", "Strategy & SOP", "Architecture & Deployment", "Logs"])
+
+    st.sidebar.markdown("---")
+    if "dark_mode" not in st.session_state:
+        st.session_state["dark_mode"] = True
+    dark_label = "🌙 Dark Mode" if st.session_state["dark_mode"] else "☀️ Light Mode"
+    if st.sidebar.toggle(dark_label, value=st.session_state["dark_mode"], key="_dark_mode_toggle"):
+        if not st.session_state["dark_mode"]:
+            st.session_state["dark_mode"] = True
+            st.rerun()
+    else:
+        if st.session_state["dark_mode"]:
+            st.session_state["dark_mode"] = False
+            st.rerun()
 
     if page == "Dashboard":
         render_dashboard(db)
@@ -428,7 +476,7 @@ def render_dashboard(db):
         with st.expander(f"📊 View Bot's Trade History for {spec['name']}"):
             spec_trades = db.get_specialist_all_trades(spec['name'])
             if spec_trades:
-                tdf = pd.DataFrame(spec_trades, columns=['Market', 'Entry Price', 'Timestamp', 'Result', 'Slug', 'Outcome', 'Bet Size', 'End Date'])
+                tdf = pd.DataFrame(spec_trades, columns=['Market', 'Entry Price', 'Timestamp', 'Result', 'Slug', 'Outcome', 'Bet Size', 'End Date', 'Leader Price', 'Market Price'])
                 tdf['Entry Price'] = tdf['Entry Price'].apply(lambda x: f"${x:.2f}")
                 tdf['Bet Size'] = tdf['Bet Size'].apply(lambda x: f"${x:.2f}" if x and x > 0 else "—")
                 tdf['Market Link'] = tdf['Slug'].apply(lambda x: f"https://polymarket.com/event/{x}" if x else "")

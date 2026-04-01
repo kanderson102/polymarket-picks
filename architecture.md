@@ -1,39 +1,145 @@
-# 🏛️ Polymarket Bot: System Architecture
+# 🏛️ Polymarket Copy-Bot: Architecture & Deployment
 
-This outlines the infrastructure and deployment pipeline for running the copy-bot safely across Local (your Macbook) and Remote (Hetzner Cloud) environments.
+This document covers the system architecture, file structure, and deployment workflow.
 
-## Architecture Diagram
+---
 
-**1. Local Development Mac**
-* **Code & Data**: You edit files like `database.py` in VS Code. `trading.db` is stored locally for testing.
-* **Testing**: You run the Streamlit Dashboard and the `bot.py` loop locally to verify changes.
-* **Deployment**: You run `git commit` and `git push` to send your code to the GitHub Repository.
+## System Overview
 
-**2. GitHub Actions (Automated CI/CD)**
-* **Trigger**: A push to the `main` branch automatically alerts the Hetzner server to pull new changes.
-* **Action**: Hetzner safely stops the current bot, rebuilds its Docker container, and pulls your latest code from GitHub.
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  Local Mac (Development)                                        │
+│  ┌──────────┐  ┌──────────┐  ┌─────────────┐  ┌───────────┐  │
+│  │  VS Code  │  │  app.py  │  │   bot.py    │  │ trading.db│  │
+│  │  Editor   │  │Streamlit │  │  Bot Daemon │  │  SQLite   │  │
+│  └──────────┘  └──────────┘  └─────────────┘  └───────────┘  │
+│         │                                                       │
+│         └──────────── git push ──────────────────────────▶     │
+└─────────────────────────────────────────────────────────────────┘
+                                    │
+                          GitHub Repository
+                                    │
+                       GitHub Actions (deploy.yml)
+                          triggers on push to main
+                                    │
+                                    ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  Hetzner VPS (Production)                                       │
+│  ┌──────────────────────────────────────────────────────────┐  │
+│  │  Docker Container                                        │  │
+│  │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌────────┐  │  │
+│  │  │  app.py  │  │  bot.py  │  │ws_listen │  │  .env  │  │  │
+│  │  │Streamlit │  │  Daemon  │  │  er.py   │  │ (keys) │  │  │
+│  │  └──────────┘  └──────────┘  └──────────┘  └────────┘  │  │
+│  │              ↕ shared trading.db                        │  │
+│  └──────────────────────────────────────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────┘
+                          │                │
+                  Polymarket APIs      Telegram
+               (Gamma + CLOB + Data)    Alerts
+```
 
-**3. Hetzner Production Server**
-* **Environment Variables**: The `.env` file (containing API/Private Keys) lives ONLY on the server and maps securely to the Docker instance.
-* **Database**: `trading.db` runs live inside the container, tracking real trades.
-* **Execution**: The Live Streamlit UI and Live Copy-Bot Daemon pull directly from this live `trading.db`. 
+---
 
-**4. External Protocols**
-* The live Daemon scans the **Polymarket Protocol (Gamma API)** for open positions.
-* It executes orders via the **CLOB API**.
-* Profits are successfully transferred out to the **User's Main Safety Wallet**.
+## Core Files
 
-## Local vs Remote Workflow (Best Practices)
+| File | Purpose |
+|------|---------|
+| `app.py` | Streamlit dashboard — all UI, charts, settings, controls |
+| `bot.py` | Main bot daemon — polling loop, trade logic, order execution |
+| `ws_listener.py` | WebSocket listener for real-time trade detection |
+| `database.py` | SQLite ORM — specialists, trades, config, heartbeat |
+| `finance.py` | Bet sizing, harvest logic, slippage/value/liquidity checks |
+| `requirements.txt` | Python dependencies |
+| `Dockerfile` | Container definition for production |
+| `docker-compose.yml` | Orchestrates app + bot services |
+| `.env` | Secrets (never committed — see `.env.example`) |
+| `.env.example` | Template for all required environment variables |
 
-1. **Total Isolation**. Your Local Mac environment and your Hetzner Production environment operate completely isolated from one another. This is by design. You never want your local test server "subscribing" to your live production database, because hitting `start.sh` on your local laptop could accidentally fire live, real-money duplicate trades!
-2. **Updating Traders.** When you want to permanently cement a new trader into your roster, you edit the "defaults" array in `database.py` locally and push to GitHub.
-3. **Deploying.** You SSH into your Hetzner server and `git pull`. When you start your bot on Hetzner, the code detects the new python source file and dynamically reconstructs the live `trading.db` from those defaults without losing historical memory.
-4. **Environment Variables.** The `.env` file containing your Private Keys, Alchemy endpoints, and Telegram IDs is strictly blocked from Github via `.gitignore`. You must log into Hetzner and type `nano .env` exactly once during initial setup to insert your secret keys. 
+---
 
-## What to do next to go live?
-1. Edit `database.py`'s `defaults` array on your Mac to lock in the actual `0x...` hashes over any "MOCK_" placeholders.
-2. Ensure you have your `BOT_PRIVATE_KEY` and `ALCHEMY_POLYGON_URL` mapped locally to test it end-to-end.
-3. Push everything to your remote Github Repo.
-4. Clone the Repo onto your Hetzner VPS.
-5. Create `.env` on Hetzner and paste the keys in.
-6. Trigger the start script via a screen or daemon!
+## Data Layer: SQLite (`trading.db`)
+
+Four tables drive the system:
+
+- **`specialists`** — tracked traders (name, wallet, tier, tags, win rate, status)
+- **`trades`** — all trade records (pending, won, lost) with full price/size data
+- **`bot_config`** — key-value store for all algorithm parameters (editable via Settings UI)
+- **`bot_heartbeat`** — single-row table updated every poll cycle; used by the dashboard to display bot status
+
+### Algorithm Configuration
+All financial parameters live in `bot_config` and are editable from the **Settings** page in the dashboard — no code changes or server restarts required. Changes take effect on the next polling cycle. See `strategy.md` for the full parameter reference.
+
+---
+
+## Deployment Pipeline
+
+### Automated (GitHub Actions)
+Every push to `main` triggers `.github/workflows/deploy.yml`:
+1. GitHub Actions SSH into the Hetzner server (credentials stored as GitHub Secrets — never hardcoded)
+2. `git pull` fetches the latest code
+3. Docker rebuilds and restarts the container
+
+### Manual Server Access
+SSH in directly for troubleshooting:
+```bash
+ssh user@your-hetzner-ip
+cd ~/polymarket-picks
+docker compose logs -f        # tail live logs
+docker compose restart        # force restart
+```
+
+### Environment Variables (Production)
+All secrets live in `.env` on the Hetzner server only. To update:
+```bash
+ssh user@your-hetzner-ip
+nano ~/polymarket-picks/.env
+docker compose restart
+```
+
+Never commit `.env`. Use `.env.example` as the template.
+
+---
+
+## Local Development Setup
+
+```bash
+# Clone and set up
+git clone https://github.com/YOUR_USERNAME/polymarket-picks.git
+cd polymarket-picks
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env        # fill in your values
+
+# Run the dashboard only (no live trading)
+streamlit run app.py
+
+# Run the full bot (paper trading by default)
+python bot.py
+```
+
+> **Important:** Local and production environments are completely isolated. Your local `trading.db` is separate from the server's live database. Never point your local bot at the production database.
+
+---
+
+## Current Status: Paper Trading (Phase 1)
+
+The bot is in **paper trading mode**. Trade logic, bet sizing, slippage checks, and auto-resolution all run as normal, but no real CLOB orders are submitted. Trades are recorded in the database as `MOCK_*` entries.
+
+When you're ready to go live:
+1. Add real specialist wallet addresses via the dashboard **Add New Trader** form (replaces any `MOCK_*` placeholders)
+2. Set `BOT_PRIVATE_KEY` and `ALCHEMY_POLYGON_URL` in your `.env`
+3. Enable live order execution in `bot.py` (the CLOB client is wired but gated behind the mock flag)
+4. Deploy to Hetzner via `git push origin main`
+
+---
+
+## Adding or Updating Specialists
+
+Specialists are managed entirely through the **Streamlit Dashboard** — no database migrations or code edits needed:
+
+- **Add**: Click **➕ Add New Trader**, fill in name, wallet address, tier, and category tags
+- **Update**: Edit win rate, status, or tags directly in the Specialists table
+- **Remove**: Set status to `INACTIVE` — the bot skips inactive specialists automatically
+
+Changes persist to `trading.db` immediately and are picked up on the next polling cycle.
