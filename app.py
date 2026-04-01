@@ -1876,7 +1876,7 @@ def _render_saved_hb_comparison():
 
 def render_architecture():
     st.title("🏛️ Architecture & Deployment")
-    arch_path = os.path.join(os.path.dirname(__file__), "architecture.md")
+    arch_path = os.path.join(os.path.dirname(__file__), "docs", "architecture.md")
     if os.path.exists(arch_path):
         with open(arch_path, "r") as f:
             content = f.read()
@@ -1886,7 +1886,7 @@ def render_architecture():
 
 def render_strategy():
     st.title("📚 Strategy & Standard Operating Procedures")
-    strategy_path = os.path.join(os.path.dirname(__file__), "strategy.md")
+    strategy_path = os.path.join(os.path.dirname(__file__), "docs", "strategy.md")
     if os.path.exists(strategy_path):
         with open(strategy_path, "r") as f:
             content = f.read()

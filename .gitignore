@@ -33,9 +33,10 @@ venv/
 *.db-shm
 *.db-wal
 
-# Internal docs / PRD
-docs/
+# Internal docs / PRD (private — not for public repo)
 OVERVIEW.md
+docs/PRD*
+docs/backtests/
 
 # Claude Code local config (not relevant to contributors)
 .claude/
