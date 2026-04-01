@@ -114,6 +114,41 @@ class TradingDB:
                     harvested REAL DEFAULT 0.0
                 )
             """)
+
+            # Bot Config Table — all tunable algorithm parameters
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS bot_config (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    description TEXT DEFAULT ''
+                )
+            """)
+            config_defaults = [
+                ("sharp_bet_pct_low",          "5.0",  "SHARP bet % when balance < $200"),
+                ("sharp_bet_pct_mid",          "3.0",  "SHARP bet % when balance $200–$999"),
+                ("sharp_bet_pct_high",         "1.5",  "SHARP bet % when balance ≥ $1000"),
+                ("whale_bet_pct_low",          "3.0",  "WHALE bet % when balance < $200"),
+                ("whale_bet_pct_mid",          "2.0",  "WHALE bet % when balance $200–$999"),
+                ("whale_bet_pct_high",         "1.0",  "WHALE bet % when balance ≥ $1000"),
+                ("harvest_trigger_multiplier", "2.0",  "Harvest when balance reaches N× baseline"),
+                ("harvest_transfer_pct",       "50.0", "% of profit to transfer to main wallet on harvest"),
+                ("value_cap_sports",           "0.82", "Max entry price for sports markets (0–1)"),
+                ("value_cap_politics",         "0.75", "Max entry price for politics/elections markets (0–1)"),
+                ("slippage_threshold_pct",     "2.5",  "Max % price slippage before skipping a trade"),
+                ("min_wallet_buffer",          "5.0",  "USDC to always keep in reserve"),
+                ("sharp_min_win_rate",         "55.0", "Minimum win rate % to copy a SHARP specialist"),
+                ("whale_min_win_rate",         "40.0", "Minimum win rate % to copy a WHALE specialist"),
+                ("max_days_sports",            "60",   "Max days-to-expiry allowed for sports markets"),
+                ("max_days_default",           "90",   "Max days-to-expiry allowed for non-sports markets"),
+                ("poll_interval",              "30",   "Seconds between polling cycles"),
+                ("enable_tag_filter",          "0",    "1 = only copy within specialist's domain tags, 0 = copy all"),
+                ("enable_telegram",            "1",    "1 = send Telegram alerts, 0 = silent mode"),
+                ("liquidity_multiple",         "2.0",  "Required order book liquidity as a multiple of bet size"),
+            ]
+            cursor.executemany(
+                "INSERT OR IGNORE INTO bot_config (key, value, description) VALUES (?, ?, ?)",
+                config_defaults
+            )
             conn.commit()
 
     def add_trade(self, specialist: str, market: str, entry_price: float, slug: str = "", outcome: str = "Yes", bet_size: float = 0.0, end_date: str = "", leader_price: float = 0.0, market_price: float = 0.0) -> int:
@@ -348,7 +383,7 @@ class TradingDB:
             cursor = conn.cursor()
             cursor.execute("""
                 SELECT id, specialist, market, entry_price, slug, outcome, bet_size
-                FROM trades 
+                FROM trades
                 WHERE result = 'PENDING' AND slug != ''
                 ORDER BY timestamp ASC
             """)
@@ -361,4 +396,37 @@ class TradingDB:
                 }
                 for r in rows
             ]
+
+    # ------------------------------------------------------------------
+    # Bot Configuration
+    # ------------------------------------------------------------------
+
+    def get_config(self, key: str, default=None):
+        """Return a single config value by key, or default if not found."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT value FROM bot_config WHERE key = ?", (key,))
+            row = cursor.fetchone()
+            return row[0] if row else default
+
+    def get_all_config(self) -> dict:
+        """Return all config rows as {key: {value, description}}."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT key, value, description FROM bot_config ORDER BY key")
+            return {r[0]: {"value": r[1], "description": r[2]} for r in cursor.fetchall()}
+
+    def set_config(self, key: str, value) -> None:
+        """Upsert a config value, preserving the existing description."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT INTO bot_config (key, value, description)
+                VALUES (?, ?, COALESCE((SELECT description FROM bot_config WHERE key = ?), ''))
+                ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                """,
+                (key, str(value), key)
+            )
+            conn.commit()
 

@@ -190,13 +190,14 @@ def get_best_ask(asset_id: str) -> float:
     return 0.0
 
 
-def get_max_days_for_tags(market_tags: list[str]) -> int:
-    """Return the max allowed days-to-expiry based on market category tags.
-    Sports get 30 days (playoff series, tournaments). Everything else gets 14 days."""
+def get_max_days_for_tags(market_tags: list[str], cfg: dict = None) -> int:
+    """Return the max allowed days-to-expiry based on market category tags."""
+    max_sports = int(cfg.get('max_days_sports', MAX_DAYS_SPORTS)) if cfg else MAX_DAYS_SPORTS
+    max_default = int(cfg.get('max_days_default', MAX_DAYS_DEFAULT)) if cfg else MAX_DAYS_DEFAULT
     for tag in market_tags:
         if tag in SPORTS_TAGS:
-            return MAX_DAYS_SPORTS
-    return MAX_DAYS_DEFAULT
+            return max_sports
+    return max_default
 
 
 class PolymarketBot:
@@ -245,6 +246,12 @@ class PolymarketBot:
             logging.info(f"🔄 Pre-seeded {len(self.seen_positions)} positions from existing DB trades")
 
     def send_telegram_alert(self, message: str):
+        # Check DB config first; fall back to env var ENABLE_TELEGRAM (default on)
+        db_enabled = self.db.get_config("enable_telegram", "1")
+        env_enabled = os.environ.get("ENABLE_TELEGRAM", "true").lower()
+        if db_enabled == "0" or env_enabled == "false":
+            return
+
         token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip("\"'")
         chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip("\"'")
         if not token or not chat_id:
@@ -387,16 +394,16 @@ class PolymarketBot:
         if expired_count > 0:
             logging.info(f"⏰ Expired {expired_count} stale trades this cycle")
 
-    def check_order_book_depth(self, asset_id: str, bet_size: float) -> tuple[bool, float]:
+    def check_order_book_depth(self, asset_id: str, bet_size: float, cfg: dict = None) -> tuple[bool, float]:
         """Check if there's enough liquidity in the order book for our bet size."""
         try:
             resp = requests.get(f"{CLOB_URL}/book?token_id={asset_id}", timeout=3)
             if resp.status_code == 200:
                 book_data = resp.json()
-                return FinanceController.check_liquidity(book_data, bet_size)
+                return FinanceController.check_liquidity(book_data, bet_size, cfg)
         except Exception as e:
             logging.debug(f"Order book check failed for {asset_id}: {e}")
-        
+
         # If check fails, allow the trade (don't block on optional check)
         return True, 0.0
 
@@ -420,13 +427,18 @@ class PolymarketBot:
         EST = timezone(timedelta(hours=-5))
         SUMMARY_HOURS = {8, 12, 16, 20}  # 8am, 12pm, 4pm, 8pm EST
         sent_summary_for = set()  # Track which hours we already sent
-        
+
         # Start WebSocket listener in background
         self._start_websocket()
-        
+
+        cfg = {}
         while True:
             try:
                 self.db.record_heartbeat()
+
+                # Load tunable config from DB on every cycle so UI changes take effect live
+                cfg_rows = self.db.get_all_config()
+                cfg = {k: v["value"] for k, v in cfg_rows.items()}
                 
                 # Send summary at 8am, 12pm, 4pm, 8pm EST
                 now_est = datetime.now(EST)
@@ -443,10 +455,10 @@ class PolymarketBot:
                 
                 db_specs = self.db.get_all_specialists()
                 dynamic_specialists = [Specialist(s["name"], s["wallet"], s["tags"], s.get("tier", "SHARP"), s.get("is_active", True)) for s in db_specs]
-                
+
                 for spec in dynamic_specialists:
                     if not spec.is_active or "MOCK" in spec.wallet_address:
-                        continue 
+                        continue
                         
                     # Query specialist open positions using Polymarket Data API
                     resp = requests.get(f"{DATA_API_URL}/positions?user={spec.wallet_address}", timeout=10)
@@ -479,7 +491,7 @@ class PolymarketBot:
                                                 self.seen_positions.add(pos_id)
                                                 continue  # Skip past markets
                                             
-                                            max_days = get_max_days_for_tags(market_tags)
+                                            max_days = get_max_days_for_tags(market_tags, cfg)
                                             days_out = (end_dt - now).days
                                             if days_out > max_days:
                                                 self.seen_positions.add(pos_id)
@@ -520,11 +532,11 @@ class PolymarketBot:
                                     if current_market_price <= 0:
                                         current_market_price = price  # Fallback to avgPrice if CLOB unavailable
                                     
-                                    status, msg_reason, bet_size = self.execute_trade_logic(spec, matched_tag, current_market_price, price, market, slug, outcome)
+                                    status, msg_reason, bet_size = self.execute_trade_logic(spec, matched_tag, current_market_price, price, market, slug, outcome, cfg)
                                     
                                     if status == "PASSED":
                                         # Order book depth check before final execution
-                                        has_liquidity, avail_liq = self.check_order_book_depth(pos_id, bet_size)
+                                        has_liquidity, avail_liq = self.check_order_book_depth(pos_id, bet_size, cfg)
                                         if not has_liquidity and avail_liq > 0:
                                             logging.warning(f"⚠️ Low liquidity for {market}: ${avail_liq:.2f} available, need ${bet_size*2:.2f}")
                                             # Still proceed but note it — at Phase 1 sizes this is rarely an issue
@@ -575,71 +587,69 @@ class PolymarketBot:
             except Exception as e:
                 logging.error(f"Error in monitor loop: {e}")
                 self.send_telegram_alert(f"🚨 CRITICAL ERROR in monitor_loop: {e}")
-                
-            time.sleep(POLL_INTERVAL)
 
-    def execute_trade_logic(self, specialist: Specialist, market_tag: str, current_price: float, leader_price: float, market_name: str, slug: str = "", outcome: str = ""):
+            time.sleep(int(cfg.get('poll_interval', POLL_INTERVAL)))
+
+    def execute_trade_logic(self, specialist: Specialist, market_tag: str, current_price: float, leader_price: float, market_name: str, slug: str = "", outcome: str = "", cfg: dict = None):
         """
-        Runs the full check based on the PRD before sending the CLOB API order.
+        Runs the full check before entering a trade.
         Returns a tuple: (Status, Reason_String, Bet_Size)
         Status can be "PASSED", "PERMANENT_REJECT", or "TEMPORARY_REJECT".
+        cfg is the bot_config dict loaded from the DB (all values as strings).
         """
         # 0. Collision Check / Opposing Bets
-        # Check by slug+outcome (reliable) with market name fallback for old trades without slugs.
-        # Prevents paying fees to wash ourselves out or taking both YES and NO on the same market.
         recent_trades = self.db.get_all_recent_trades(50)
         for t in recent_trades:
             if t[4] != 'PENDING':
                 continue
             trade_slug = t[5] if len(t) > 5 else ''
             trade_outcome = t[6] if len(t) > 6 else ''
-            # Primary check: same slug and same outcome
             if slug and trade_slug and slug == trade_slug and outcome == trade_outcome:
                 return "PERMANENT_REJECT", f"Already holding {outcome} on {market_name}", 0.0
-            # Fallback: same market name (for trades without slugs)
             if not slug or not trade_slug:
                 if t[1] == market_name:
                     return "PERMANENT_REJECT", f"Already holding an active position in {market_name}", 0.0
 
         # 1. Health Monitor Check
         win_rate = self.db.get_specialist_win_rate(specialist.name)
-        
-        # WHALE threshold is 40.0%, SHARP threshold is 55.0%
-        min_win_rate = 40.0 if specialist.tier == 'WHALE' else 55.0
-        
+        sharp_min = float(cfg.get('sharp_min_win_rate', 55.0)) if cfg else 55.0
+        whale_min = float(cfg.get('whale_min_win_rate', 40.0)) if cfg else 40.0
+        min_win_rate = whale_min if specialist.tier == 'WHALE' else sharp_min
+
         if win_rate < min_win_rate:
             return "PERMANENT_REJECT", f"Probation (Win Rate {win_rate}% < {min_win_rate}%)", 0.0
-            
+
         # 2. Correct Tag ID Mapping Check
         if str(market_tag) not in specialist.target_tags:
             tag_name = TAG_MAP.get(str(market_tag), market_tag)
             return "PERMANENT_REJECT", f"{tag_name} outside domain", 0.0
 
         # 3. Adaptive Value Caps
-        max_entry = FinanceController.get_max_price_for_tag(market_tag)
+        max_entry = FinanceController.get_max_price_for_tag(market_tag, cfg)
         if current_price > max_entry:
             return "TEMPORARY_REJECT", f"Current Price {current_price} exceeds Value Cap {max_entry}", 0.0
 
         # 4. No Chase / Slippage Check
-        if not FinanceController.is_slippage_acceptable(leader_price, current_price):
-            return "TEMPORARY_REJECT", f"Price slipped to ${current_price:.3f} vs specialist's ${leader_price:.3f} (>{2.5}% gap)", 0.0
+        threshold = float(cfg.get('slippage_threshold_pct', 2.5)) if cfg else 2.5
+        if not FinanceController.is_slippage_acceptable(leader_price, current_price, cfg):
+            return "TEMPORARY_REJECT", f"Price slipped to ${current_price:.3f} vs specialist's ${leader_price:.3f} (>{threshold}% gap)", 0.0
 
-        # 5. Position Sizing — wallet balance IS the available capital
-        # (USDC leaves wallet on buy, so no need to subtract pending exposure)
+        # 5. Position Sizing
         wallet_balance = get_wallet_balance()
+        min_buffer = float(cfg.get('min_wallet_buffer', 5.0)) if cfg else 5.0
 
-        if wallet_balance < 5.0:
-            return "TEMPORARY_REJECT", f"Insufficient Balance (${wallet_balance:.2f} USDC, $5.00 minimum)", 0.0
+        if wallet_balance < min_buffer:
+            return "TEMPORARY_REJECT", f"Insufficient Balance (${wallet_balance:.2f} USDC, ${min_buffer:.2f} minimum)", 0.0
 
-        bet_size = FinanceController.calculate_bet_size(wallet_balance, specialist.tier, win_rate)
-        if bet_size > wallet_balance - 5.0:
-            bet_size = wallet_balance - 5.0  # Preserve $5 buffer
+        bet_size = FinanceController.calculate_bet_size(wallet_balance, specialist.tier, win_rate, cfg)
+        if bet_size > wallet_balance - min_buffer:
+            bet_size = wallet_balance - min_buffer
 
         return "PASSED", f"Validated for ${bet_size:.2f} bet", float(bet_size)
 
-    def process_harvesting(self, current_balance: float):
+    def process_harvesting(self, current_balance: float, cfg: dict = None):
         baseline, _ = self.db.get_performance()
-        result = FinanceController.check_harvest(current_balance, baseline)
+        result = FinanceController.check_harvest(current_balance, baseline, cfg)
         if result.triggered:
             # Main Wallet Harvesting API Call goes here (Polygon transfer)
             self.db.update_performance_post_harvest(result.new_baseline, result.transfer_amount)

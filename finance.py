@@ -14,10 +14,15 @@ class HarvestResult:
 class FinanceController:
     """
     Handles bankroll management, position sizing, and profit harvesting logic.
+
+    Most methods accept an optional `cfg` dict (loaded from the DB bot_config
+    table) so every parameter is tunable via the Settings UI without code changes.
+    When cfg is None, the original hardcoded defaults are used — so existing
+    call sites and tests continue to work unchanged.
     """
 
     @staticmethod
-    def _get_base_percent(balance: float, tier: str) -> float:
+    def _get_base_percent(balance: float, tier: str, cfg: dict = None) -> float:
         """
         Graduated base percentage that tapers as bankroll grows.
         Keeps bets meaningful at $50, prevents oversized bets at $1000+.
@@ -27,21 +32,22 @@ class FinanceController:
         """
         if tier == 'SHARP':
             if balance < 200:
-                return 0.05
+                pct = float(cfg.get('sharp_bet_pct_low', 5.0)) if cfg else 5.0
             elif balance < 1000:
-                return 0.03
+                pct = float(cfg.get('sharp_bet_pct_mid', 3.0)) if cfg else 3.0
             else:
-                return 0.015
+                pct = float(cfg.get('sharp_bet_pct_high', 1.5)) if cfg else 1.5
         else:  # WHALE
             if balance < 200:
-                return 0.03
+                pct = float(cfg.get('whale_bet_pct_low', 3.0)) if cfg else 3.0
             elif balance < 1000:
-                return 0.02
+                pct = float(cfg.get('whale_bet_pct_mid', 2.0)) if cfg else 2.0
             else:
-                return 0.01
+                pct = float(cfg.get('whale_bet_pct_high', 1.0)) if cfg else 1.0
+        return pct / 100.0
 
     @staticmethod
-    def calculate_bet_size(current_balance: float, tier: str, win_rate: float) -> float:
+    def calculate_bet_size(current_balance: float, tier: str, win_rate: float, cfg: dict = None) -> float:
         """
         Dynamic Position Sizing with graduated bankroll scaling.
 
@@ -52,8 +58,9 @@ class FinanceController:
             WHALE:  $0-199 → 3%  |  $200-999 → 2%  |  $1000+ → 1%
 
         Win rate multiplier still applies: (win_rate / 50.0).
+        Pass a cfg dict (from TradingDB.get_all_config()) to override defaults.
         """
-        base_percent = FinanceController._get_base_percent(current_balance, tier)
+        base_percent = FinanceController._get_base_percent(current_balance, tier, cfg)
 
         # Scale the bet size dynamically by their historical win rate
         # A 75% win rate grinder will place 1.5x larger bets automatically
@@ -62,21 +69,24 @@ class FinanceController:
         return current_balance * base_percent * win_rate_multiplier
 
     @staticmethod
-    def check_harvest(current_balance: float, baseline_capital: float) -> HarvestResult:
+    def check_harvest(current_balance: float, baseline_capital: float, cfg: dict = None) -> HarvestResult:
         """
-        Growth-First Harvesting (2x Rule).
-        Trigger: If Wallet_Balance >= 2 * Baseline_Capital.
-        Action: 
+        Growth-First Harvesting.
+        Trigger: If Wallet_Balance >= N * Baseline_Capital  (default N=2, the "2x Rule").
+        Action:
           1. Profit = Balance - Baseline
-          2. Transfer 50% of Profit to Main Wallet
+          2. Transfer X% of Profit to Main Wallet  (default X=50%)
           3. Set New Baseline = Current Balance - Transfer Amount
         """
-        if current_balance >= 2 * baseline_capital:
+        trigger_mult = float(cfg.get('harvest_trigger_multiplier', 2.0)) if cfg else 2.0
+        transfer_pct = float(cfg.get('harvest_transfer_pct', 50.0)) / 100.0 if cfg else 0.50
+
+        if current_balance >= trigger_mult * baseline_capital:
             profit = current_balance - baseline_capital
-            transfer_amount = profit * 0.50
+            transfer_amount = profit * transfer_pct
             new_balance = current_balance - transfer_amount
             new_baseline = new_balance
-            
+
             return HarvestResult(
                 triggered=True,
                 transfer_amount=transfer_amount,
@@ -84,7 +94,7 @@ class FinanceController:
                 new_balance=new_balance,
                 profit=profit
             )
-        
+
         # No harvest triggered
         return HarvestResult(
             triggered=False,
@@ -95,7 +105,7 @@ class FinanceController:
         )
 
     @staticmethod
-    def get_max_price_for_tag(tag_id: str) -> float:
+    def get_max_price_for_tag(tag_id: str, cfg: dict = None) -> float:
         """
         Adaptive "Value Caps" — max entry price by category.
 
@@ -106,33 +116,27 @@ class FinanceController:
         - Only filter truly extreme prices (0.90+) where implied probability
           leaves almost no edge for the copy-trader.
         """
-        tag_limits = {
-            "745": 0.82,      # NBA
-            "28": 0.82,       # Basketball
-            "100350": 0.82,   # Soccer
-            "100977": 0.82,   # UCL
-            "306": 0.82,      # EPL
-            "82": 0.82,       # Premier League
-            "100381": 0.82,   # MLB
-            "678": 0.82,      # baseball
-            "899": 0.82,      # NHL
-            "100088": 0.82,   # Hockey
-            "100089": 0.82,   # Stanley Cup
-            "64": 0.82,       # Esports
-            "102366": 0.82,   # Dota 2
-            "2": 0.75,        # Politics (higher volatility, tighter cap)
-            "144": 0.75,      # Elections
-            "100265": 0.75,   # Geopolitics
-            "1": 0.82,        # Sports (generic)
-            "100639": 0.82,   # Games (generic)
-        }
+        sports_cap = float(cfg.get('value_cap_sports', 0.82)) if cfg else 0.82
+        politics_cap = float(cfg.get('value_cap_politics', 0.75)) if cfg else 0.75
 
-        return tag_limits.get(str(tag_id), 0.75)  # Default fallback 0.75
+        SPORTS_TAGS = {
+            "745", "28", "100350", "100977", "306", "82",
+            "100381", "678", "899", "100088", "100089",
+            "64", "102366", "1", "100639",
+        }
+        POLITICS_TAGS = {"2", "144", "100265"}
+
+        tag = str(tag_id)
+        if tag in SPORTS_TAGS:
+            return sports_cap
+        if tag in POLITICS_TAGS:
+            return politics_cap
+        return politics_cap  # conservative default for unknown categories
 
     @staticmethod
     def calculate_conviction_size(current_balance: float, tier: str,
                                   win_rate: float, specialist_size: float,
-                                  specialist_avg_size: float) -> float:
+                                  specialist_avg_size: float, cfg: dict = None) -> float:
         """
         Conviction-aware position sizing.
 
@@ -148,7 +152,7 @@ class FinanceController:
 
         Falls back to standard calculate_bet_size if no specialist data.
         """
-        base_bet = FinanceController.calculate_bet_size(current_balance, tier, win_rate)
+        base_bet = FinanceController.calculate_bet_size(current_balance, tier, win_rate, cfg)
 
         if specialist_avg_size <= 0 or specialist_size <= 0:
             return base_bet
@@ -169,71 +173,71 @@ class FinanceController:
         return base_bet * multiplier
 
     @staticmethod
-    def is_slippage_acceptable(specialist_price: float, current_market_price: float) -> bool:
+    def is_slippage_acceptable(specialist_price: float, current_market_price: float, cfg: dict = None) -> bool:
         """
         The "No Chase" Rule.
-        If current market price is > 2.5% higher than the specialist's price, Abort.
-        (e.g., Target paid 0.50 -> 2.5% higher is 0.5125. If current is 0.52, return False)
+        If current market price is > slippage_threshold_pct% higher than the
+        specialist's price, abort. Default threshold is 2.5%.
         """
-        max_acceptable_price = specialist_price * 1.025
+        threshold = float(cfg.get('slippage_threshold_pct', 2.5)) / 100.0 if cfg else 0.025
+        max_acceptable_price = specialist_price * (1 + threshold)
         return current_market_price <= max_acceptable_price
 
     @staticmethod
-    def check_liquidity(book_data: dict, bet_size: float) -> tuple[bool, float]:
+    def check_liquidity(book_data: dict, bet_size: float, cfg: dict = None) -> tuple[bool, float]:
         """
         Order Book Depth Check.
         Verifies there is sufficient liquidity at the best ask to fill the bet.
         Returns (is_sufficient, available_liquidity).
+        Requires at least liquidity_multiple × bet_size in the top 3 asks.
         """
+        liq_multiple = float(cfg.get('liquidity_multiple', 2.0)) if cfg else 2.0
         asks = book_data.get('asks', [])
         if not asks:
             return False, 0.0
-        
+
         # Sum available liquidity across top 3 price levels
         total_liquidity = 0.0
         for ask in asks[:3]:
             price = float(ask.get('price', 0))
             size = float(ask.get('size', 0))
             total_liquidity += price * size
-        
-        # Require at least 2x bet size in available liquidity
-        is_sufficient = total_liquidity >= (bet_size * 2)
+
+        is_sufficient = total_liquidity >= (bet_size * liq_multiple)
         return is_sufficient, total_liquidity
 
     @staticmethod
     def estimate_taker_fee(price: float, tag_id: str) -> float:
         """
         Estimate Polymarket taker fee for a given price and category.
-        
+
         Fees are dynamic and peak around 50¢ prices, tapering to zero near 0¢/100¢.
         Returns the estimated fee as a dollar amount per $1 of bet size.
-        
-        Current peak rates (pre-March 30, 2026):
-            Sports: 0.44%  |  After March 30: 0.75%
+
+        Current peak rates (post-March 30, 2026):
+            Sports: 0.75%
             Politics/Tech: 1.00%
             Pop Culture: 1.25%
             Crypto: 1.56% → 1.80%
         """
-        # Peak fee rates by category (as of March 30, 2026 schedule)
         SPORTS_TAGS = {"745", "28", "100350", "100977", "306", "82", "100381", "678", "899", "100088", "100089", "64", "102366", "1", "100639"}
         POLITICS_TAGS = {"2", "144", "100265"}
-        TECH_TAGS = set()
-        POP_CULTURE_TAGS = set()
-        
+        POP_CULTURE_TAGS: set = set()
+
         tag = str(tag_id)
         if tag in SPORTS_TAGS:
             peak_rate = 0.0075  # 0.75%
-        elif tag in POLITICS_TAGS or tag in TECH_TAGS:
+        elif tag in POLITICS_TAGS:
             peak_rate = 0.0100  # 1.00%
         elif tag in POP_CULTURE_TAGS:
             peak_rate = 0.0125  # 1.25%
         else:
             peak_rate = 0.0100  # Default conservative
-        
+
         # Fees peak at price=0.50, taper toward 0 and 1
         # Using a simple parabolic model: fee_rate = peak_rate * 4 * price * (1 - price)
         fee_rate = peak_rate * 4 * price * (1 - price)
-        
+
         return fee_rate
 
     @staticmethod
@@ -245,6 +249,3 @@ class FinanceController:
         if leader_price <= 0:
             return 0.0
         return ((market_price - leader_price) / leader_price) * 100
-
-
-

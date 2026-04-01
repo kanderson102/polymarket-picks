@@ -54,7 +54,7 @@ def main():
     db = TradingDB()
 
     st.sidebar.title("Navigation")
-    page = st.sidebar.radio("Go to", ["Dashboard", "Backtest Simulator", "Historical Backtest", "Strategy & SOP", "Architecture & Deployment", "Logs"])
+    page = st.sidebar.radio("Go to", ["Dashboard", "Backtest Simulator", "Historical Backtest", "Settings", "Controls", "Strategy & SOP", "Architecture & Deployment", "Logs"])
 
     if page == "Dashboard":
         render_dashboard(db)
@@ -62,6 +62,10 @@ def main():
         render_backtest(db)
     elif page == "Historical Backtest":
         render_historical_backtest(db)
+    elif page == "Settings":
+        render_settings(db)
+    elif page == "Controls":
+        render_controls(db)
     elif page == "Strategy & SOP":
         render_strategy()
     elif page == "Architecture & Deployment":
@@ -126,7 +130,7 @@ def render_dashboard(db):
     col_active.metric("Active Pending Positions", active_positions)
     
     if recent_trades:
-        trades_df = pd.DataFrame(recent_trades[:20], columns=['Specialist', 'Market', 'Entry Price', 'Timestamp', 'Status', 'Slug', 'Outcome', 'Bet Size', 'End Date'])
+        trades_df = pd.DataFrame(recent_trades[:20], columns=['Specialist', 'Market', 'Entry Price', 'Timestamp', 'Status', 'Slug', 'Outcome', 'Bet Size', 'End Date', 'Leader Price', 'Market Price'])
         trades_df['Entry Price'] = trades_df['Entry Price'].apply(lambda x: f"${x:.2f}")
         trades_df['Bet Size'] = trades_df['Bet Size'].apply(lambda x: f"${x:.2f}" if x and x > 0 else "—")
         # Make Specialist name a clickable link to their Polymarket profile
@@ -1608,6 +1612,194 @@ def render_strategy():
         st.markdown(content)
     else:
         st.error("Strategy document not found.")
+
+def render_settings(db):
+    st.title("⚙️ Algorithm Settings")
+    st.markdown("All tunable parameters for the copy-bot strategy. Changes take effect on the bot's next polling cycle.")
+
+    cfg = db.get_all_config()
+
+    def val(key, cast=float):
+        return cast(cfg[key]["value"]) if key in cfg else None
+
+    st.markdown("---")
+
+    # --- Position Sizing ---
+    st.subheader("Position Sizing")
+    st.caption("Bet size as a % of current wallet balance, graduated by bankroll tier.")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("**SHARP tier** (volume grinders, 55%+ win rate)")
+        s_low  = st.number_input("Balance < $200 (%)",    min_value=0.1, max_value=25.0, value=val("sharp_bet_pct_low"),  step=0.1, key="s_low",  format="%.1f")
+        s_mid  = st.number_input("Balance $200–$999 (%)", min_value=0.1, max_value=25.0, value=val("sharp_bet_pct_mid"),  step=0.1, key="s_mid",  format="%.1f")
+        s_high = st.number_input("Balance ≥ $1000 (%)",   min_value=0.1, max_value=25.0, value=val("sharp_bet_pct_high"), step=0.1, key="s_high", format="%.1f")
+    with col2:
+        st.markdown("**WHALE tier** (swing traders, 40%+ win rate)")
+        w_low  = st.number_input("Balance < $200 (%)",    min_value=0.1, max_value=25.0, value=val("whale_bet_pct_low"),  step=0.1, key="w_low",  format="%.1f")
+        w_mid  = st.number_input("Balance $200–$999 (%)", min_value=0.1, max_value=25.0, value=val("whale_bet_pct_mid"),  step=0.1, key="w_mid",  format="%.1f")
+        w_high = st.number_input("Balance ≥ $1000 (%)",   min_value=0.1, max_value=25.0, value=val("whale_bet_pct_high"), step=0.1, key="w_high", format="%.1f")
+
+    st.markdown("---")
+
+    # --- Win Rate Thresholds ---
+    st.subheader("Win Rate Thresholds")
+    st.caption("Specialists below their tier threshold are placed on probation and skipped.")
+
+    col3, col4 = st.columns(2)
+    with col3:
+        sharp_wr = st.slider("SHARP min win rate (%)", 30.0, 80.0, val("sharp_min_win_rate"), 1.0, key="sharp_wr")
+    with col4:
+        whale_wr = st.slider("WHALE min win rate (%)", 20.0, 70.0, val("whale_min_win_rate"), 1.0, key="whale_wr")
+
+    st.markdown("---")
+
+    # --- Entry Filters ---
+    st.subheader("Entry Filters")
+
+    col5, col6 = st.columns(2)
+    with col5:
+        v_sports   = st.slider("Value cap — Sports (max entry price)", 0.50, 0.99, val("value_cap_sports"),   0.01, key="v_sports",   format="%.2f")
+        v_politics = st.slider("Value cap — Politics (max entry price)", 0.50, 0.99, val("value_cap_politics"), 0.01, key="v_politics", format="%.2f")
+    with col6:
+        slip_thr   = st.slider("Slippage threshold (%)", 0.5, 15.0, val("slippage_threshold_pct"), 0.5, key="slip_thr")
+        liq_mult   = st.slider("Liquidity multiple (vs bet size)", 1.0, 5.0, val("liquidity_multiple"), 0.5, key="liq_mult")
+
+    st.markdown("---")
+
+    # --- Market Filters ---
+    st.subheader("Market Filters")
+
+    col7, col8 = st.columns(2)
+    with col7:
+        max_d_sports  = st.number_input("Max days-to-expiry — Sports",    min_value=1, max_value=365, value=val("max_days_sports",  int), key="max_d_sp")
+        max_d_default = st.number_input("Max days-to-expiry — Non-sports", min_value=1, max_value=365, value=val("max_days_default", int), key="max_d_df")
+    with col8:
+        tag_filter = st.toggle("Enable tag filter (strict domain only)", value=val("enable_tag_filter", int) == 1, key="tag_filt",
+                               help="OFF = copy all trades. ON = only copy markets within a specialist's assigned categories.")
+
+    st.markdown("---")
+
+    # --- Harvest & Reserve ---
+    st.subheader("Harvest & Reserve")
+
+    col9, col10 = st.columns(2)
+    with col9:
+        harv_mult   = st.number_input("Harvest trigger (N× baseline)", min_value=1.1, max_value=10.0, value=val("harvest_trigger_multiplier"), step=0.1, format="%.1f", key="harv_mult")
+        harv_pct    = st.number_input("Harvest transfer (%)",           min_value=10.0, max_value=100.0, value=val("harvest_transfer_pct"), step=5.0, format="%.0f", key="harv_pct")
+    with col10:
+        min_buf     = st.number_input("Min wallet buffer ($)",          min_value=1.0, max_value=100.0, value=val("min_wallet_buffer"), step=1.0, format="%.1f", key="min_buf")
+        poll_int    = st.number_input("Poll interval (seconds)",        min_value=5, max_value=300, value=val("poll_interval", int), step=5, key="poll_int")
+
+    st.markdown("---")
+
+    if st.button("💾 Save All Settings", type="primary"):
+        updates = {
+            "sharp_bet_pct_low":          s_low,
+            "sharp_bet_pct_mid":          s_mid,
+            "sharp_bet_pct_high":         s_high,
+            "whale_bet_pct_low":          w_low,
+            "whale_bet_pct_mid":          w_mid,
+            "whale_bet_pct_high":         w_high,
+            "sharp_min_win_rate":         sharp_wr,
+            "whale_min_win_rate":         whale_wr,
+            "value_cap_sports":           v_sports,
+            "value_cap_politics":         v_politics,
+            "slippage_threshold_pct":     slip_thr,
+            "liquidity_multiple":         liq_mult,
+            "max_days_sports":            max_d_sports,
+            "max_days_default":           max_d_default,
+            "enable_tag_filter":          1 if tag_filter else 0,
+            "harvest_trigger_multiplier": harv_mult,
+            "harvest_transfer_pct":       harv_pct,
+            "min_wallet_buffer":          min_buf,
+            "poll_interval":              poll_int,
+        }
+        for key, value in updates.items():
+            db.set_config(key, value)
+        st.success("Settings saved. The bot will pick them up on its next poll cycle.")
+        st.rerun()
+
+    with st.expander("Reset to Defaults"):
+        st.warning("This will restore all algorithm settings to their original values.")
+        if st.button("Reset All to Defaults", key="reset_defaults"):
+            defaults = {
+                "sharp_bet_pct_low": 5.0, "sharp_bet_pct_mid": 3.0, "sharp_bet_pct_high": 1.5,
+                "whale_bet_pct_low": 3.0, "whale_bet_pct_mid": 2.0, "whale_bet_pct_high": 1.0,
+                "harvest_trigger_multiplier": 2.0, "harvest_transfer_pct": 50.0,
+                "value_cap_sports": 0.82, "value_cap_politics": 0.75,
+                "slippage_threshold_pct": 2.5, "min_wallet_buffer": 5.0,
+                "sharp_min_win_rate": 55.0, "whale_min_win_rate": 40.0,
+                "max_days_sports": 60, "max_days_default": 90,
+                "poll_interval": 30, "enable_tag_filter": 0,
+            }
+            for key, value in defaults.items():
+                db.set_config(key, value)
+            st.success("Settings reset to defaults.")
+            st.rerun()
+
+
+def render_controls(db):
+    st.title("🎛️ Bot Controls")
+    st.markdown("Manual controls and notifications. The bot must be running for these actions to have an effect.")
+
+    cfg = db.get_all_config()
+    telegram_enabled = cfg.get("enable_telegram", {}).get("value", "1") == "1"
+
+    # --- Telegram ---
+    st.subheader("Telegram Notifications")
+    col1, col2 = st.columns([1, 3])
+    with col1:
+        new_tg = st.toggle("Enable Telegram", value=telegram_enabled, key="tg_toggle")
+        if new_tg != telegram_enabled:
+            db.set_config("enable_telegram", 1 if new_tg else 0)
+            st.rerun()
+    with col2:
+        st.caption("When disabled, the bot runs silently — no alerts for trades, resolutions, or errors.")
+
+    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip("\"'")
+    chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip("\"'")
+    tg_configured = bool(token and chat_id)
+
+    if not tg_configured:
+        st.info("Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in your `.env` to enable notifications.")
+    else:
+        st.success("Telegram credentials are configured.")
+        if telegram_enabled:
+            if st.button("Send Test Message"):
+                try:
+                    url = f"https://api.telegram.org/bot{token}/sendMessage"
+                    resp = requests.post(url, json={"chat_id": chat_id, "text": "✅ Test message from Polymarket Copy-Bot dashboard."}, timeout=5)
+                    if resp.status_code == 200:
+                        st.success("Test message sent!")
+                    else:
+                        st.error(f"Telegram returned HTTP {resp.status_code}: {resp.text}")
+                except Exception as e:
+                    st.error(f"Failed: {e}")
+
+    st.markdown("---")
+
+    # --- Database Actions ---
+    st.subheader("Database Actions")
+
+    col3, col4 = st.columns(2)
+    with col3:
+        st.markdown("**Purge pending trades**")
+        st.caption("Clears all PENDING trades to free up paper capital. Useful after a strategy reset.")
+        if st.button("🧹 Purge All Pending Trades", key="purge_pending_ctrl"):
+            db.clear_all_pending_trades()
+            st.success("All pending trades cleared.")
+            st.rerun()
+
+    st.markdown("---")
+
+    # --- Current Config Summary ---
+    st.subheader("Active Configuration Summary")
+    st.caption("Read-only view of all current settings. Edit them in the Settings page.")
+    all_cfg = db.get_all_config()
+    cfg_rows = [{"Setting": k, "Value": v["value"], "Description": v["description"]} for k, v in sorted(all_cfg.items())]
+    st.dataframe(pd.DataFrame(cfg_rows), use_container_width=True, hide_index=True)
+
 
 def render_logs():
     st.title("Server Logs")
