@@ -41,16 +41,183 @@ def get_human_readable_tags(tags):
 REVERSE_TAG_MAP = {v: k for k, v in TAG_MAP.items()}
 
 def _init_saved_views():
-    """Initialize session state for saved backtest views."""
+    """Initialize session state for saved backtest views and MC sidebar defaults."""
     if "saved_mc_views" not in st.session_state:
         st.session_state.saved_mc_views = []
     if "saved_hb_views" not in st.session_state:
         st.session_state.saved_hb_views = []
+    # MC sidebar defaults (used for pre-population when loading a saved view)
+    mc_defaults = {
+        "mc_bankroll": 50.0, "mc_days": 90, "mc_num_simulations": 500,
+        "mc_num_sharp": 7, "mc_num_whale": 2,
+        "mc_sharp_wr": 58.0, "mc_whale_wr": 48.0,
+        "mc_trades_per_day": 8, "mc_avg_entry_price": 0.45,
+        "mc_slippage_pct": 1.0, "mc_avg_fee_rate": 0.75,
+        "mc_enable_harvest": True, "mc_min_buffer": 5.0, "mc_max_slippage": 2.5,
+    }
+    for k, v in mc_defaults.items():
+        if k not in st.session_state:
+            st.session_state[k] = v
+
+
+def _inject_css():
+    st.markdown("""
+<style>
+/* ── Global ─────────────────────────────────────────────────── */
+html, body, [data-testid="stAppViewContainer"] {
+    background-color: #0a0d12;
+}
+[data-testid="stMain"] > div {
+    padding-top: 0.5rem;
+}
+
+/* ── Gradient accent bar under page title ───────────────────── */
+h1 {
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid #1a2236;
+    letter-spacing: -0.02em;
+    font-size: 1.8rem !important;
+}
+h2 { letter-spacing: -0.01em; color: #c8d6ef; }
+h3 { color: #9aabbf; font-size: 1rem !important; text-transform: uppercase; letter-spacing: 0.06em; }
+
+/* ── Sidebar ────────────────────────────────────────────────── */
+[data-testid="stSidebar"] {
+    background: #080b10 !important;
+    border-right: 1px solid #1a2236 !important;
+}
+[data-testid="stSidebar"] .stRadio label {
+    font-size: 0.85rem;
+    letter-spacing: 0.02em;
+}
+
+/* ── Metric cards ───────────────────────────────────────────── */
+[data-testid="stMetric"] {
+    background: #111720 !important;
+    border: 1px solid #1e2d42 !important;
+    border-radius: 8px !important;
+    padding: 1rem 1.2rem !important;
+    transition: border-color 0.2s;
+}
+[data-testid="stMetric"]:hover {
+    border-color: #00e5a0 !important;
+}
+[data-testid="stMetricValue"] {
+    font-size: 1.75rem !important;
+    font-weight: 700 !important;
+    color: #e2f0ff !important;
+    font-family: 'SF Mono', 'Fira Code', monospace !important;
+}
+[data-testid="stMetricLabel"] {
+    font-size: 0.7rem !important;
+    text-transform: uppercase !important;
+    letter-spacing: 0.08em !important;
+    color: #5c7a9a !important;
+}
+[data-testid="stMetricDelta"] svg { display: none; }
+
+/* ── Primary button ─────────────────────────────────────────── */
+.stButton > button[kind="primary"] {
+    background: linear-gradient(135deg, #00c48a 0%, #00a0f0 100%) !important;
+    border: none !important;
+    color: #000 !important;
+    font-weight: 700 !important;
+    letter-spacing: 0.04em !important;
+    border-radius: 6px !important;
+    padding: 0.5rem 1.4rem !important;
+    transition: opacity 0.15s, transform 0.1s !important;
+}
+.stButton > button[kind="primary"]:hover {
+    opacity: 0.9 !important;
+    transform: translateY(-1px) !important;
+}
+
+/* ── Secondary buttons ──────────────────────────────────────── */
+.stButton > button[kind="secondary"],
+.stButton > button {
+    background: #111720 !important;
+    border: 1px solid #1e2d42 !important;
+    color: #9aabbf !important;
+    border-radius: 6px !important;
+    transition: border-color 0.15s, color 0.15s !important;
+}
+.stButton > button:hover {
+    border-color: #00e5a0 !important;
+    color: #00e5a0 !important;
+}
+
+/* ── Dataframes ─────────────────────────────────────────────── */
+[data-testid="stDataFrame"] {
+    border: 1px solid #1a2236 !important;
+    border-radius: 8px !important;
+    overflow: hidden !important;
+}
+
+/* ── Expanders ──────────────────────────────────────────────── */
+[data-testid="stExpander"] {
+    border: 1px solid #1a2236 !important;
+    border-radius: 8px !important;
+    background: #0d1219 !important;
+}
+
+/* ── Forms / inputs ─────────────────────────────────────────── */
+[data-testid="stTextInput"] input,
+[data-testid="stNumberInput"] input {
+    background: #0d1219 !important;
+    border-color: #1e2d42 !important;
+    color: #dde3ee !important;
+}
+
+/* ── Horizontal rule ────────────────────────────────────────── */
+hr { border-color: #1a2236 !important; }
+
+/* ── View cards (saved backtest views) ──────────────────────── */
+.view-card {
+    background: #111720;
+    border: 1px solid #1e2d42;
+    border-radius: 10px;
+    padding: 0.9rem 1.1rem;
+    margin-bottom: 0.5rem;
+    transition: border-color 0.2s;
+}
+.view-card:hover { border-color: #00e5a0; }
+.view-card-title {
+    font-size: 0.85rem;
+    font-weight: 600;
+    color: #dde3ee;
+    margin-bottom: 0.4rem;
+    letter-spacing: 0.02em;
+}
+.view-card-meta {
+    font-size: 0.72rem;
+    color: #5c7a9a;
+    font-family: 'SF Mono', monospace;
+}
+.view-card-metric {
+    font-size: 1.1rem;
+    font-weight: 700;
+    font-family: 'SF Mono', monospace;
+}
+.pos { color: #22c55e; }
+.neg { color: #ef4444; }
+.neutral { color: #f59e0b; }
+
+/* ── Status badge ───────────────────────────────────────────── */
+.badge-live  { color: #22c55e; font-size: 0.75rem; letter-spacing: 0.08em; }
+.badge-off   { color: #5c7a9a; font-size: 0.75rem; letter-spacing: 0.08em; }
+</style>
+""", unsafe_allow_html=True)
 
 
 def main():
-    st.set_page_config(page_title="Polymarket Copy-Bot", layout="wide")
+    st.set_page_config(
+        page_title="Polymarket Copy-Bot",
+        page_icon="📡",
+        layout="wide",
+        initial_sidebar_state="expanded",
+    )
     _init_saved_views()
+    _inject_css()
     db = TradingDB()
 
     st.sidebar.title("Navigation")
@@ -303,38 +470,37 @@ def render_dashboard(db):
         st.write("")
 
 def render_backtest(db):
-    st.title("🧪 Backtest Simulator")
-    st.markdown("Monte Carlo simulation using the bot's actual Kelly criterion sizing, value caps, slippage, and harvest logic.")
+    st.title("🧪 Monte Carlo Simulator")
+    st.markdown("Simulate strategy performance across hundreds of random scenarios using the bot's actual Kelly sizing, value caps, slippage, and harvest logic.")
 
-    # --- Sidebar Controls ---
+    # --- Sidebar Controls (session-state keys allow pre-population from saved views) ---
     st.sidebar.markdown("---")
     st.sidebar.header("Simulation Parameters")
 
-    bankroll = st.sidebar.number_input("Starting Bankroll ($)", min_value=10.0, max_value=100000.0, value=50.0, step=10.0)
-    days = st.sidebar.slider("Simulation Days", min_value=7, max_value=365, value=90)
-    num_simulations = st.sidebar.slider("Monte Carlo Runs", min_value=50, max_value=2000, value=500, step=50)
+    bankroll        = st.sidebar.number_input("Starting Bankroll ($)", min_value=10.0, max_value=100000.0, step=10.0, key="mc_bankroll")
+    days            = st.sidebar.slider("Simulation Days", min_value=7, max_value=365, key="mc_days")
+    num_simulations = st.sidebar.slider("Monte Carlo Runs", min_value=50, max_value=2000, step=50, key="mc_num_simulations")
 
     st.sidebar.markdown("---")
     st.sidebar.subheader("Specialist Mix")
-    num_sharp = st.sidebar.number_input("SHARP Specialists", min_value=0, max_value=20, value=7)
-    num_whale = st.sidebar.number_input("WHALE Specialists", min_value=0, max_value=10, value=2)
-    sharp_wr = st.sidebar.slider("SHARP Avg Win Rate (%)", min_value=40.0, max_value=80.0, value=58.0, step=1.0)
-    whale_wr = st.sidebar.slider("WHALE Avg Win Rate (%)", min_value=30.0, max_value=70.0, value=48.0, step=1.0)
+    num_sharp  = st.sidebar.number_input("SHARP Specialists", min_value=0, max_value=20, key="mc_num_sharp")
+    num_whale  = st.sidebar.number_input("WHALE Specialists", min_value=0, max_value=10, key="mc_num_whale")
+    sharp_wr   = st.sidebar.slider("SHARP Avg Win Rate (%)", min_value=40.0, max_value=80.0, step=1.0, key="mc_sharp_wr")
+    whale_wr   = st.sidebar.slider("WHALE Avg Win Rate (%)", min_value=30.0, max_value=70.0, step=1.0, key="mc_whale_wr")
 
     st.sidebar.markdown("---")
     st.sidebar.subheader("Market Conditions")
-    trades_per_day = st.sidebar.slider("Avg Trades/Day (all specialists)", min_value=1, max_value=30, value=8)
-    avg_entry_price = st.sidebar.slider("Avg Entry Price ($)", min_value=0.10, max_value=0.90, value=0.45, step=0.05)
-    slippage_pct = st.sidebar.slider("Avg Slippage (%)", min_value=0.0, max_value=5.0, value=1.0, step=0.25)
-    avg_fee_rate = st.sidebar.slider("Avg Taker Fee (%)", min_value=0.0, max_value=2.0, value=0.75, step=0.05)
+    trades_per_day  = st.sidebar.slider("Avg Trades/Day (all specialists)", min_value=1, max_value=30, key="mc_trades_per_day")
+    avg_entry_price = st.sidebar.slider("Avg Entry Price ($)", min_value=0.10, max_value=0.90, step=0.05, key="mc_avg_entry_price")
+    slippage_pct    = st.sidebar.slider("Avg Slippage (%)", min_value=0.0, max_value=5.0, step=0.25, key="mc_slippage_pct")
+    avg_fee_rate    = st.sidebar.slider("Avg Taker Fee (%)", min_value=0.0, max_value=2.0, step=0.05, key="mc_avg_fee_rate")
 
     st.sidebar.markdown("---")
     st.sidebar.subheader("Risk & Harvest")
-    enable_harvest = st.sidebar.checkbox("Enable 2x Harvest Rule", value=True)
-    min_buffer = st.sidebar.number_input("Min Buffer ($)", min_value=1.0, max_value=50.0, value=5.0, step=1.0)
-    max_slippage = st.sidebar.slider("Max Slippage Reject (%)", min_value=0.5, max_value=10.0, value=2.5, step=0.5)
+    enable_harvest = st.sidebar.checkbox("Enable 2x Harvest Rule", key="mc_enable_harvest")
+    min_buffer     = st.sidebar.number_input("Min Buffer ($)", min_value=1.0, max_value=50.0, step=1.0, key="mc_min_buffer")
+    max_slippage   = st.sidebar.slider("Max Slippage Reject (%)", min_value=0.5, max_value=10.0, step=0.5, key="mc_max_slippage")
 
-    # Collect current params for saved views
     mc_params = {
         "bankroll": bankroll, "days": days, "num_simulations": num_simulations,
         "num_sharp": num_sharp, "num_whale": num_whale,
@@ -345,19 +511,22 @@ def render_backtest(db):
         "max_slippage": max_slippage,
     }
 
-    if st.button("Run Simulation", type="primary"):
-        results = _run_monte_carlo(**mc_params)
+    # Auto-run if a view was just loaded
+    autorun = st.session_state.pop("_mc_autorun", False)
+    if st.button("▶  Run Simulation", type="primary") or autorun:
+        with st.spinner("Running simulations..."):
+            results = _run_monte_carlo(**mc_params)
         st.session_state["_last_mc_results"] = results
         st.session_state["_last_mc_params"] = mc_params
 
     # Render last results if available
     results = st.session_state.get("_last_mc_results")
-    params = st.session_state.get("_last_mc_params")
+    params  = st.session_state.get("_last_mc_params")
     if results is not None and params is not None:
         _render_backtest_results(results, params["bankroll"], params["days"], params["enable_harvest"])
         _render_save_view_mc(results, params)
 
-    # Always show saved views comparison at bottom
+    # Always show saved views at bottom
     _render_saved_mc_comparison()
 
 
@@ -647,26 +816,28 @@ def _render_backtest_results(results, bankroll, days, enable_harvest):
 def _render_save_view_mc(results, params):
     """Save current Monte Carlo results as a named view."""
     st.markdown("---")
-    st.subheader("Save This View")
+    st.subheader("💾 Save This View")
     col_name, col_btn = st.columns([3, 1])
     with col_name:
-        view_name = st.text_input("View Name", value=f"View {len(st.session_state.saved_mc_views) + 1}", key="mc_view_name")
+        view_name = st.text_input("View Name", value=f"Sim {len(st.session_state.saved_mc_views) + 1} · ${params['bankroll']:.0f} · {params['days']}d", key="mc_view_name")
     with col_btn:
-        st.write("")  # spacer
+        st.write("")
         if st.button("Save View", key="mc_save_btn"):
-            finals = results["final_balances"]
+            finals    = results["final_balances"]
             harvested = results["harvested"]
-            trades = results["trades"]
-            wins = results["wins"]
-            losses = results["losses"]
-            max_dd = results["max_drawdown"]
-            bankroll = params["bankroll"]
+            trades    = results["trades"]
+            wins      = results["wins"]
+            losses    = results["losses"]
+            max_dd    = results["max_drawdown"]
+            bankroll  = params["bankroll"]
             median_final = float(np.median(finals))
             roi = ((median_final - bankroll) / bankroll) * 100
             avg_wr = float(np.mean(wins / np.maximum(wins + losses, 1)) * 100)
             view = {
+                "id": f"mc_{int(time.time())}_{len(st.session_state.saved_mc_views)}",
                 "name": view_name,
                 "params": params.copy(),
+                "results": results,   # full numpy results stored for reload
                 "metrics": {
                     "median_final": median_final,
                     "mean_final": float(np.mean(finals)),
@@ -686,48 +857,90 @@ def _render_save_view_mc(results, params):
 
 
 def _render_saved_mc_comparison():
-    """Show saved Monte Carlo views in a comparison table."""
+    """Show saved Monte Carlo views as interactive cards + comparison table."""
     views = st.session_state.saved_mc_views
     if not views:
         return
 
     st.markdown("---")
-    st.header("Saved Views Comparison")
+    st.subheader("📂 Saved Simulations")
 
-    # Build comparison table
-    rows = []
-    for v in views:
+    # Cards row
+    cols = st.columns(min(len(views), 4))
+    for i, v in enumerate(views):
         m = v["metrics"]
         p = v["params"]
-        rows.append({
-            "View": v["name"],
-            "Bankroll": f"${p['bankroll']:.0f}",
-            "Days": p["days"],
-            "Sims": p["num_simulations"],
-            "SHARP/WHALE": f"{p['num_sharp']}/{p['num_whale']}",
-            "SHARP WR": f"{p['sharp_wr']:.0f}%",
-            "WHALE WR": f"{p['whale_wr']:.0f}%",
-            "Trades/Day": p["trades_per_day"],
-            "Median Final": f"${m['median_final']:.2f}",
-            "ROI": f"{m['roi']:+.1f}%",
-            "Win Rate": f"{m['avg_win_rate']:.1f}%",
-            "Max DD": f"{m['avg_max_dd']:.1f}%",
-            "P5": f"${m['p5']:.2f}",
-            "P95": f"${m['p95']:.2f}",
-            "Harvested": f"${m['median_harvested']:.2f}",
-            "Ruin %": f"{m['ruin_rate']:.1f}%",
-        })
+        roi_cls = "pos" if m["roi"] >= 0 else "neg"
+        with cols[i % min(len(views), 4)]:
+            st.markdown(f"""
+<div class="view-card">
+  <div class="view-card-title">{v['name']}</div>
+  <div class="view-card-meta">${p['bankroll']:.0f} · {p['days']}d · {p['num_simulations']} runs</div>
+  <div class="view-card-meta">{p['num_sharp']}S / {p['num_whale']}W · {p['sharp_wr']:.0f}%/{p['whale_wr']:.0f}% WR</div>
+  <div style="margin-top:0.5rem">
+    <span class="view-card-metric {roi_cls}">{m['roi']:+.1f}% ROI</span>
+    <span class="view-card-meta" style="margin-left:0.6rem">${m['median_final']:.0f} median</span>
+  </div>
+  <div class="view-card-meta" style="margin-top:0.2rem">
+    P5 ${m['p5']:.0f} · P95 ${m['p95']:.0f} · DD {m['avg_max_dd']:.0f}%
+  </div>
+</div>
+""", unsafe_allow_html=True)
+            btn_col1, btn_col2 = st.columns(2)
+            with btn_col1:
+                if st.button("⬆ Load", key=f"mc_load_{v['id']}", help="Restore this simulation's results and parameters"):
+                    # Restore display results
+                    st.session_state["_last_mc_results"] = v["results"]
+                    st.session_state["_last_mc_params"]  = v["params"]
+                    # Pre-populate sidebar for the loaded params
+                    p = v["params"]
+                    st.session_state["mc_bankroll"]         = float(p["bankroll"])
+                    st.session_state["mc_days"]             = int(p["days"])
+                    st.session_state["mc_num_simulations"]  = int(p["num_simulations"])
+                    st.session_state["mc_num_sharp"]        = int(p["num_sharp"])
+                    st.session_state["mc_num_whale"]        = int(p["num_whale"])
+                    st.session_state["mc_sharp_wr"]         = float(p["sharp_wr"])
+                    st.session_state["mc_whale_wr"]         = float(p["whale_wr"])
+                    st.session_state["mc_trades_per_day"]   = int(p["trades_per_day"])
+                    st.session_state["mc_avg_entry_price"]  = float(p["avg_entry_price"])
+                    st.session_state["mc_slippage_pct"]     = float(p["slippage_pct"])
+                    st.session_state["mc_avg_fee_rate"]     = float(p["avg_fee_rate"])
+                    st.session_state["mc_enable_harvest"]   = bool(p["enable_harvest"])
+                    st.session_state["mc_min_buffer"]       = float(p["min_buffer"])
+                    st.session_state["mc_max_slippage"]     = float(p["max_slippage"])
+                    st.rerun()
+            with btn_col2:
+                if st.button("🗑 Delete", key=f"mc_del_{v['id']}"):
+                    st.session_state.saved_mc_views = [sv for sv in st.session_state.saved_mc_views if sv["id"] != v["id"]]
+                    st.rerun()
 
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-
-    # Delete buttons
-    st.caption("Remove saved views:")
-    cols = st.columns(min(len(views), 6))
-    for i, v in enumerate(views):
-        with cols[i % len(cols)]:
-            if st.button(f"Delete: {v['name']}", key=f"mc_del_{i}"):
-                st.session_state.saved_mc_views.pop(i)
-                st.rerun()
+    # Comparison table
+    if len(views) > 1:
+        st.markdown("---")
+        st.subheader("Side-by-Side Comparison")
+        rows = []
+        for v in views:
+            m = v["metrics"]
+            p = v["params"]
+            rows.append({
+                "View": v["name"],
+                "Bankroll": f"${p['bankroll']:.0f}",
+                "Days": p["days"],
+                "Sims": p["num_simulations"],
+                "SHARP/WHALE": f"{p['num_sharp']}/{p['num_whale']}",
+                "SHARP WR": f"{p['sharp_wr']:.0f}%",
+                "WHALE WR": f"{p['whale_wr']:.0f}%",
+                "Trades/Day": p["trades_per_day"],
+                "Median Final": f"${m['median_final']:.2f}",
+                "ROI": f"{m['roi']:+.1f}%",
+                "Win Rate": f"{m['avg_win_rate']:.1f}%",
+                "Max DD": f"{m['avg_max_dd']:.1f}%",
+                "P5": f"${m['p5']:.2f}",
+                "P95": f"${m['p95']:.2f}",
+                "Harvested": f"${m['median_harvested']:.2f}",
+                "Ruin %": f"{m['ruin_rate']:.1f}%",
+            })
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 
 SPORTS_TAGS = {"745", "28", "100350", "100977", "306", "82", "100381", "678", "899", "100088", "100089", "1", "100639", "64", "102366"}
@@ -1495,18 +1708,16 @@ def _render_historical_results(trade_log, equity_curve, stats, bankroll, final_b
 def _render_save_view_hb(result_data):
     """Save current historical backtest results as a named view."""
     st.markdown("---")
-    st.subheader("Save This View")
+    st.subheader("💾 Save This View")
 
-    # Auto-generate a descriptive default name from key parameters
     p = result_data.get("params", {})
     s = result_data["stats"]
     n_specs = len(p.get("selected", []))
     auto_name = (
-        f"${p.get('bankroll', 0):.0f} | {p.get('lookback_days', 0)}d | "
-        f"{p.get('max_days_sports', 0)}d sports | {n_specs} specs"
+        f"${p.get('bankroll', 0):.0f} · {p.get('lookback_days', 0)}d · "
+        f"{p.get('max_price_cap', 0.82):.0%} cap · {n_specs} specialists"
     )
 
-    # Use a counter-based key so the input resets after each save
     save_count = len(st.session_state.saved_hb_views)
     col_name, col_btn = st.columns([3, 1])
     with col_name:
@@ -1519,9 +1730,10 @@ def _render_save_view_hb(result_data):
             total_value = result_data["final_balance"] + result_data.get("pending_exposure", 0.0) + result_data["harvested_total"]
             roi = ((total_value - result_data["bankroll"]) / result_data["bankroll"]) * 100
             view = {
-                "id": f"v_{save_count}_{int(time.time())}",
+                "id": f"hb_{save_count}_{int(time.time())}",
                 "name": view_name,
                 "params": p,
+                "result_data": result_data,   # full results stored for reload
                 "metrics": {
                     "final_value": total_value,
                     "final_balance": result_data["final_balance"],
@@ -1546,51 +1758,72 @@ def _render_save_view_hb(result_data):
 
 
 def _render_saved_hb_comparison():
-    """Show saved historical backtest views in a comparison table."""
+    """Show saved historical backtest views as cards + comparison table."""
     views = st.session_state.saved_hb_views
     if not views:
         return
 
     st.markdown("---")
-    st.header("Saved Views Comparison")
+    st.subheader("📂 Saved Backtests")
 
-    rows = []
-    for v in views:
+    # Cards row
+    cols = st.columns(min(len(views), 4))
+    for i, v in enumerate(views):
         m = v["metrics"]
         p = v["params"]
-        rows.append({
-            "View": v["name"],
-            "Bankroll": f"${p.get('bankroll', 0):.0f}",
-            "Lookback": f"{p.get('lookback_days', 0)}d",
-            "Cap": f"{p.get('max_price_cap', 0.82):.0%}",
-            "Tags": "ON" if p.get("enable_tag_filter") else "OFF",
-            "Agg": "ON" if p.get("enable_fill_aggregation", True) else "OFF",
-            "Exit Copy": "ON" if p.get("enable_exit_copy", True) else "OFF",
-            "Specs": len(p.get("selected", [])),
-            "Final $": f"${m['final_value']:.2f}",
-            "ROI": f"{m['roi']:+.1f}%",
-            "Copied": m["copied"],
-            "Won": m["won"],
-            "Lost": m["lost"],
-            "Pending": m["pending"],
-            "Sold": m.get("sold", 0),
-            "Win %": f"{m['win_rate']:.0f}%",
-            "Harvested": f"${m['harvested']:.2f}",
-        })
+        roi_cls = "pos" if m["roi"] >= 0 else "neg"
+        wr_cls  = "pos" if m["win_rate"] >= 55 else ("neutral" if m["win_rate"] >= 45 else "neg")
+        with cols[i % min(len(views), 4)]:
+            st.markdown(f"""
+<div class="view-card">
+  <div class="view-card-title">{v['name']}</div>
+  <div class="view-card-meta">${p.get('bankroll',0):.0f} · {p.get('lookback_days',0)}d lookback · {len(p.get('selected',[]))} specs</div>
+  <div style="margin-top:0.5rem">
+    <span class="view-card-metric {roi_cls}">{m['roi']:+.1f}% ROI</span>
+    <span class="view-card-meta" style="margin-left:0.6rem">${m['final_value']:.0f} final</span>
+  </div>
+  <div class="view-card-meta" style="margin-top:0.2rem">
+    <span class="{wr_cls}">{m['win_rate']:.0f}% WR</span>
+    · {m['copied']} copied · {m['won']}W/{m['lost']}L
+  </div>
+</div>
+""", unsafe_allow_html=True)
+            btn_col1, btn_col2 = st.columns(2)
+            with btn_col1:
+                if st.button("⬆ Load", key=f"hb_load_{v['id']}", help="Restore this backtest's results"):
+                    st.session_state["_last_hb_results"] = v["result_data"]
+                    st.rerun()
+            with btn_col2:
+                if st.button("🗑 Delete", key=f"hb_del_{v['id']}"):
+                    st.session_state.saved_hb_views = [sv for sv in st.session_state.saved_hb_views if sv["id"] != v["id"]]
+                    st.rerun()
 
-    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-
-    st.caption("Remove saved views:")
-    cols = st.columns(min(len(views), 6))
-    for i, v in enumerate(views):
-        view_id = v.get("id", f"legacy_{i}")
-        with cols[i % len(cols)]:
-            if st.button(f"❌ {v['name']}", key=f"hb_del_{view_id}"):
-                st.session_state.saved_hb_views = [
-                    sv for sv in st.session_state.saved_hb_views
-                    if sv.get("id") != v.get("id") or sv["name"] != v["name"]
-                ]
-                st.rerun()
+    # Comparison table
+    if len(views) > 1:
+        st.markdown("---")
+        st.subheader("Side-by-Side Comparison")
+        rows = []
+        for v in views:
+            m = v["metrics"]
+            p = v["params"]
+            rows.append({
+                "View": v["name"],
+                "Bankroll": f"${p.get('bankroll', 0):.0f}",
+                "Lookback": f"{p.get('lookback_days', 0)}d",
+                "Cap": f"{p.get('max_price_cap', 0.82):.0%}",
+                "Tags": "ON" if p.get("enable_tag_filter") else "OFF",
+                "Agg": "ON" if p.get("enable_fill_aggregation", True) else "OFF",
+                "Specs": len(p.get("selected", [])),
+                "Final $": f"${m['final_value']:.2f}",
+                "ROI": f"{m['roi']:+.1f}%",
+                "Copied": m["copied"],
+                "Won": m["won"],
+                "Lost": m["lost"],
+                "Pending": m["pending"],
+                "Win %": f"{m['win_rate']:.0f}%",
+                "Harvested": f"${m['harvested']:.2f}",
+            })
+        st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
 
 def render_architecture():
