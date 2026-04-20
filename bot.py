@@ -410,9 +410,7 @@ class PolymarketBot:
     def _start_websocket(self):
         """Start the WebSocket listener for real-time trade detection."""
         def on_ws_status(message):
-            # Only send Telegram for failures/warnings, not routine connects
-            if "failed" in message.lower() or "🚨" in message:
-                self.send_telegram_alert(f"🔌 {message}")
+            pass  # server status notifications temporarily disabled
         
         self.ws_listener = PolymarketWSListener(
             on_trade_callback=None,  # We use polling + WS for detection, not pure WS
@@ -423,7 +421,7 @@ class PolymarketBot:
 
     def monitor_loop(self):
         logging.info("Starting real-time polling loop with WebSocket fallback...")
-        self.send_telegram_alert("🚀 Polymarket Copy-Bot Started and Monitoring!")
+        # self.send_telegram_alert("🚀 Polymarket Copy-Bot Started and Monitoring!")  # server status notifications temporarily disabled
         EST = timezone(timedelta(hours=-5))
         SUMMARY_HOURS = {8, 12, 16, 20}  # 8am, 12pm, 4pm, 8pm EST
         sent_summary_for = set()  # Track which hours we already sent

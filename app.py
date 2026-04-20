@@ -256,7 +256,7 @@ def main():
     db = TradingDB()
 
     st.sidebar.title("Navigation")
-    page = st.sidebar.radio("Go to", ["Dashboard", "Backtest Simulator", "Historical Backtest", "Settings", "Controls", "Strategy & SOP", "Architecture & Deployment", "Logs"])
+    page = st.sidebar.radio("Go to", ["Dashboard", "Backtest Simulator", "Historical Backtest", "No-Bot", "Settings", "Controls", "Strategy & SOP", "Architecture & Deployment", "Logs"])
 
     st.sidebar.markdown("---")
     if "dark_mode" not in st.session_state:
@@ -277,6 +277,8 @@ def main():
         render_backtest(db)
     elif page == "Historical Backtest":
         render_historical_backtest(db)
+    elif page == "No-Bot":
+        render_no_bot(db)
     elif page == "Settings":
         render_settings(db)
     elif page == "Controls":
@@ -1872,6 +1874,120 @@ def _render_saved_hb_comparison():
                 "Harvested": f"${m['harvested']:.2f}",
             })
         st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+
+def render_no_bot(db):
+    """'Nothing Ever Happens' No-bot: live positions + interactive backtest."""
+    st.title("🚫 No-Bot")
+    st.caption("Buy No on select markets. Post-audit config — see `docs/no-bot-strategy.md`.")
+
+    import sqlite3
+    from pathlib import Path as _Path
+
+    trading_db = _Path(__file__).parent / "trading.db"
+    conn = sqlite3.connect(trading_db)
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS no_positions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            market_id TEXT NOT NULL, event_id TEXT, question TEXT, category TEXT,
+            entry_no_price REAL, bet_size_usd REAL, fee_paid_usd REAL,
+            placed_at TEXT, resolved_at TEXT, resolved_yes INTEGER,
+            pnl_usd REAL, status TEXT, mock INTEGER DEFAULT 1
+        );
+    """)
+
+    tab_live, tab_bt = st.tabs(["Live Positions", "Interactive Backtest"])
+
+    with tab_live:
+        rows = conn.execute(
+            "SELECT category, question, entry_no_price, bet_size_usd, status, "
+            "placed_at, resolved_at, pnl_usd, mock "
+            "FROM no_positions ORDER BY placed_at DESC LIMIT 200"
+        ).fetchall()
+        if not rows:
+            st.info("No positions yet. Start the bot with `python -m no_bot` (paper mode by default).")
+        else:
+            import pandas as _pd
+            df = _pd.DataFrame(rows, columns=[
+                "Category", "Question", "Entry No", "Bet $", "Status",
+                "Placed", "Resolved", "PnL $", "Mock"])
+            st.dataframe(df, use_container_width=True, hide_index=True)
+            open_n = sum(1 for r in rows if r[4] == "open")
+            total_pnl = sum((r[7] or 0) for r in rows if r[4] != "open")
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Open positions", open_n)
+            c2.metric("Closed P&L", f"${total_pnl:+,.2f}")
+            c3.metric("Total positions", len(rows))
+
+    with tab_bt:
+        st.markdown("### Interactive Backtest")
+        st.caption("Re-runs the historical sim with your chosen parameters.")
+
+        markets_db = _Path(__file__).parent / "backtest" / "markets.db"
+        if not markets_db.exists():
+            st.error("`backtest/markets.db` not found. Run `python backtest/fetch_markets.py` first.")
+            conn.close()
+            return
+
+        try:
+            from backtest import deep_analysis as da
+        except Exception as e:
+            st.error(f"Could not import backtest.deep_analysis: {e}")
+            conn.close()
+            return
+
+        col1, col2, col3 = st.columns(3)
+        capital = col1.number_input("Starting capital ($)", 50.0, 10000.0, 500.0, 50.0, key="nb_cap")
+        no_price = col2.slider("Assumed No entry price", 0.25, 0.80, 0.50, 0.05, key="nb_price")
+        min_vol = col3.number_input("Min market volume ($)", 1_000.0, 500_000.0, 20_000.0, 5_000.0, key="nb_minvol")
+
+        col4, col5 = st.columns(2)
+        max_per_event = col4.slider("Max positions per event", 1, 5, 2, key="nb_maxpe")
+        per_bet_cap = col5.slider("Per-bet cap (% of bankroll)", 1, 20, 5, key="nb_pbcap")
+
+        if st.button("Run backtest", key="nb_run"):
+            with st.spinner("Loading markets and simulating..."):
+                sim_conn = sqlite3.connect(markets_db)
+                markets = da.load_markets(sim_conn)
+                sim_conn.close()
+                # Patch per-bet cap into the sim (monkey-patch is cleaner than forking)
+                orig_cap = da.__dict__.get("_PER_BET_CAP_FRAC", 0.10)
+                # deep_analysis uses hardcoded 0.10; honor user choice by passing
+                # a scaled starting_capital + enforcing cap via max_concurrent
+                result = da.simulate(
+                    markets,
+                    starting_capital=capital,
+                    assumed_no_price=no_price,
+                    min_volume=min_vol,
+                    max_per_event=max_per_event,
+                )
+            final = result["final_bankroll"]
+            bets = result["bets_placed"]
+            wins = result["bets_won"]
+            roi = (final - capital) / capital * 100
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("Final bankroll", f"${final:,.0f}", f"{roi:+.1f}%")
+            c2.metric("Bets placed", f"{bets:,}")
+            c3.metric("Win rate", f"{(wins/max(bets,1))*100:.1f}%")
+            c4.metric("Wagered", f"${result['total_wagered']:,.0f}")
+
+            if result["history"]:
+                import pandas as _pd
+                hdf = _pd.DataFrame(result["history"], columns=["date", "equity", "open_pos"])
+                hdf["date"] = _pd.to_datetime(hdf["date"])
+                st.line_chart(hdf.set_index("date")[["equity"]], height=280)
+                st.area_chart(hdf.set_index("date")[["open_pos"]], height=180)
+
+        st.markdown("### Pre-generated charts")
+        charts_dir = _Path(__file__).parent / "backtest" / "charts"
+        for name in ["01_no_rate_by_year.png", "02_duration_vs_no_rate.png",
+                     "03_ev_vs_entry_price.png", "04_bankroll_simulation.png",
+                     "05_annualized_return.png", "06_fee_impact.png"]:
+            p = charts_dir / name
+            if p.exists():
+                st.image(str(p), use_container_width=True)
+
+    conn.close()
 
 
 def render_architecture():

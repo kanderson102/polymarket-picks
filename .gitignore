@@ -40,3 +40,4 @@ docs/backtests/
 
 # Claude Code local config (not relevant to contributors)
 .claude/
+backtest/markets.db
