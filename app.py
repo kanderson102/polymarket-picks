@@ -1992,13 +1992,25 @@ def render_no_bot(db):
 
 def render_architecture():
     st.title("🏛️ Architecture & Deployment")
-    arch_path = os.path.join(os.path.dirname(__file__), "docs", "architecture.md")
-    if os.path.exists(arch_path):
-        with open(arch_path, "r") as f:
-            content = f.read()
-        st.markdown(content)
-    else:
-        st.error("Architecture document not found.")
+    docs_dir = os.path.dirname(__file__)
+
+    tab_arch, tab_runbook = st.tabs(["Architecture", "Server Runbook"])
+
+    with tab_arch:
+        arch_path = os.path.join(docs_dir, "docs", "architecture.md")
+        if os.path.exists(arch_path):
+            with open(arch_path, "r") as f:
+                st.markdown(f.read())
+        else:
+            st.error("Architecture document not found.")
+
+    with tab_runbook:
+        runbook_path = os.path.join(docs_dir, "docs", "server-runbook.md")
+        if os.path.exists(runbook_path):
+            with open(runbook_path, "r") as f:
+                st.markdown(f.read())
+        else:
+            st.error("server-runbook.md not found.")
 
 def render_strategy():
     st.title("📚 Strategy & Standard Operating Procedures")
