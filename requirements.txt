@@ -1,6 +1,7 @@
 streamlit
 pandas
 numpy
+matplotlib
 requests
 web3
 python-dotenv
