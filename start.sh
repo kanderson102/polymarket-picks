@@ -8,6 +8,10 @@ python3 fix_slugs.py
 echo "Starting Polymarket Specialist Copy-Bot..."
 python3 bot.py &
 
+# Start the No-Bot scanner/resolver loop in the background
+echo "Starting No-Bot (scanner + resolver)..."
+python3 -m no_bot &
+
 # Start the Streamlit Dashboard in the foreground
 # Binding to 0.0.0.0 allows it to be accessed externally via the server's IP
 echo "Starting Streamlit Dashboard on port 8501..."
