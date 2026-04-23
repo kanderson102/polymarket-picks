@@ -32,6 +32,76 @@ At $50 bankroll, Kelly-sized bets round to well under Polymarket's $5 minimum, s
 
 ---
 
+## 0b. Kelly Criterion — How Bet Sizes Are Calculated
+
+Both bots use **fractional Kelly sizing**. This section explains what that means.
+
+### The core formula
+
+```
+full Kelly fraction = edge / win_payout
+```
+
+**win_payout** — how much you collect per $1 bet if you win. For a No position at price P:
+```
+win_payout = (1 / P) − 1
+```
+At No = 0.40 → win_payout = 1.50 (win $1.50 per $1 bet)
+At No = 0.55 → win_payout = 0.82 (win $0.82 per $1 bet — thin)
+
+**edge** — your expected profit per $1 wagered, given your estimated win probability:
+```
+edge = (win_rate × win_payout) − (1 − win_rate)
+```
+Sports-Other at No = 0.40: `0.701 × 1.50 − 0.299 = 0.753` → 75.3¢ expected profit per $1
+
+**Full Kelly fraction**:
+```
+full Kelly = 0.753 / 1.50 = 50.2% of bankroll
+```
+
+That's the mathematically optimal fraction for maximizing long-run growth — but it's also brutal. One bad streak at 50% of bankroll per bet can cut your stack in half in two losses. Full Kelly requires perfect probability estimates, which we don't have.
+
+### Why we use fractional Kelly
+
+We multiply full Kelly by a **kelly_frac** (0.15 for moderate-edge categories, 0.20 for strong-edge):
+
+```
+bet = bankroll × full_Kelly × kelly_frac
+```
+
+Sports-Other example at $500 bankroll, No = 0.40:
+```
+bet = $500 × 0.502 × 0.15 = $37.65
+```
+Then capped by the **per-bet cap** (default 5% of bankroll = $25):
+```
+final bet = min($37.65, $25) = $25
+```
+
+The fractional multiplier serves two purposes:
+1. **Variance reduction** — smaller bets mean a losing streak doesn't cripple the bankroll
+2. **Model uncertainty** — our base rates are measured on historical data, not guaranteed future rates
+
+### How No price affects sizing
+
+Higher No price = lower win_payout = smaller Kelly bet. The formula naturally sizes down as you approach the ceiling:
+
+| No price | win_payout | Full Kelly (Sports-Other 70.1%) | Fractional (×0.15) |
+|----------|------------|----------------------------------|---------------------|
+| 0.25 | 3.00 | 50.4% | 7.6% |
+| 0.35 | 1.86 | 47.1% | 7.1% |
+| 0.45 | 1.22 | 39.4% | 5.9% |
+| 0.55 (ceiling) | 0.82 | 21.9% | 3.3% |
+
+At the ceiling, you're still placing a bet — but a small one, reflecting the thin edge.
+
+### Small-bankroll floor
+
+When bankroll < $250, Kelly-sized bets often fall below Polymarket's $5 minimum. **Small-bankroll mode** overrides the formula and bets a flat $5 per entry. This is 10% of a $50 bankroll — aggressive, but the alternative is zero trades. Disable this mode once bankroll exceeds $250.
+
+---
+
 ## 1. Copy-Bot — Trader Tiers & Bet Sizing
 
 All copied traders are classified into one of two tiers. Tier determines the base bet percentage and minimum win rate threshold.
