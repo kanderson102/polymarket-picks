@@ -1,10 +1,38 @@
-# 📈 Polymarket Copy-Bot: Strategy & SOP
+# 📈 Polymarket Bots: Strategy & SOP
 
-This document is the source of truth for the bot's financial logic, risk rules, and specialist-vetting workflow. Read this before touching `finance.py`, `bot.py`, or the Settings page.
+Source of truth for the two bots' financial logic, risk rules, and vetting workflow. Read before touching `finance.py`, `bot.py`, `no_bot/`, or the Settings page.
 
 ---
 
-## 1. Trader Tiers & Bet Sizing
+## 0. Two-Bot Overview
+
+Two independent strategies sharing one bankroll and one database (`trading.db`).
+
+| | **Copy-Bot** (`bot.py`) | **No-Bot** (`no_bot/`) |
+|---|---|---|
+| **Thesis** | Mirror vetted specialist wallets on trades within their proven domain. | "Nothing Ever Happens": 73% of Polymarket binary-matchup markets resolve No. |
+| **Entry signal** | Specialist opens a new position (via REST poll + WebSocket). | Scanner finds an open single-market event in an enabled category, No ask ≤ ceiling. |
+| **Markets** | Whatever the specialist trades (binary or multi-leg). | **Binary matchups only** — events with exactly one market. Brackets are skipped. |
+| **Categories** | Per-specialist tag filter. | Only Tech-AI / Sports-Other / Politics (the three with ≥60 samples and meaningful margin over breakeven). |
+| **Sizing** | % of wallet balance, graduated by balance tier & tier (SHARP/WHALE). | Fractional Kelly per category, capped at `nb_max_bet_pct` of bankroll. Small-bankroll mode flips to flat $5 bets when bankroll < $250. |
+| **Go-live gate** | Specialist toggles on **Specialists** tab + `COPY_BOT_LIVE=true`. | `nb_live_mode` toggle on **Settings → No-Bot** (executor is a TODO — paper-only today). |
+| **Configurable from UI** | **Settings → Copy-Bot** | **Settings → No-Bot** |
+| **Live positions** | **Dashboard** → Live Activity Log | **Dashboard** → No-Bot Live Positions |
+| **Backtest** | **Copy-Bot Backtest** tab | **No-Bot Backtest** tab |
+
+### Shared infrastructure
+
+- **Telegram**: master switch + per-notification toggles on **Settings → System**. Defaults: buy / resolve / error = ON; hourly summary and skip messages = OFF.
+- **Database**: `trading.db` (`trades` table for copy-bot, `no_positions` for no-bot, `bot_config` for UI-editable settings).
+- **Historical data**: `backtest/markets.db` — 55MB snapshot of resolved markets, gitignored.
+
+### Small-bankroll operating mode ($50 start)
+
+At $50 bankroll, Kelly-sized bets round to well under Polymarket's $5 minimum, so `nb_small_bankroll=1` flips sizing to a flat $5 per entry. That's 10% of bankroll — aggressive by design; the alternative is zero trades. Fast-turnover mode (default ON) ranks candidates so fast-resolving categories (Sports-Other ≈12d, Politics ≈33d) fill before slow ones (Tech-AI ≈75d), recycling capital faster. Once bankroll > $250, flip `nb_small_bankroll=0` and Kelly sizing takes over.
+
+---
+
+## 1. Copy-Bot — Trader Tiers & Bet Sizing
 
 All copied traders are classified into one of two tiers. Tier determines the base bet percentage and minimum win rate threshold.
 

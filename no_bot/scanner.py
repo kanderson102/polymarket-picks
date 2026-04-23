@@ -15,7 +15,13 @@ from typing import Iterable, Optional
 
 import requests
 
-from .config import CATEGORY_CONFIG, EXCLUDED_CATEGORIES, MIN_VOLUME_USD
+from .config import EXCLUDED_CATEGORIES
+from .runtime import RuntimeConfig, load as load_runtime
+
+# Fast-turnover ordering: ascending by median resolution horizon so we prefer
+# categories that recycle capital faster. Sports-Other ≈12d, Politics ≈33d,
+# Tech-AI ≈75d. (Reindex when adding new categories.)
+_FAST_TURNOVER_RANK = {"Sports-Other": 0, "Politics": 1, "Tech-AI": 2}
 
 log = logging.getLogger(__name__)
 
@@ -85,8 +91,10 @@ def _parse_no_ask(market: dict) -> Optional[float]:
         return None
 
 
-def find_candidates(max_events: int = 500) -> list[dict]:
+def find_candidates(max_events: int = 500, rc: RuntimeConfig | None = None) -> list[dict]:
     """Return a list of candidate-market dicts ready for sizing & execution."""
+    if rc is None:
+        rc = load_runtime()
     candidates: list[dict] = []
     seen_events = 0
     offset = 0
@@ -104,7 +112,7 @@ def find_candidates(max_events: int = 500) -> list[dict]:
             seen_events += 1
             tags = [str(t["id"]) for t in event.get("tags", []) if isinstance(t, dict)]
             category = categorize(tags)
-            if category in EXCLUDED_CATEGORIES or category not in CATEGORY_CONFIG:
+            if category in EXCLUDED_CATEGORIES or category not in rc.categories:
                 continue
 
             # Binary-matchup-only rule. Our base rates are measured on events
@@ -117,11 +125,11 @@ def find_candidates(max_events: int = 500) -> list[dict]:
             if len(event_markets) != 1:
                 continue
 
-            rule = CATEGORY_CONFIG[category]
+            rule = rc.categories[category]
             event_id = str(event.get("id", ""))
             for market in event_markets:
                 volume = float(market.get("volumeNum", 0) or 0)
-                if volume < MIN_VOLUME_USD:
+                if volume < rc.min_volume_usd:
                     continue
                 no_price = _parse_no_ask(market)
                 if no_price is None or no_price > rule.ceiling:
@@ -143,6 +151,9 @@ def find_candidates(max_events: int = 500) -> list[dict]:
         offset += len(events)
         if len(events) < 100:
             break
+
+    if rc.fast_turnover:
+        candidates.sort(key=lambda c: _FAST_TURNOVER_RANK.get(c["category"], 99))
 
     log.info("Scanner found %d candidates from %d events", len(candidates), seen_events)
     return candidates

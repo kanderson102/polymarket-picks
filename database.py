@@ -92,8 +92,25 @@ class TradingDB:
                     ("CERTuo", "0xf195721ad850377c96cd634457c70cd9e8308057", "100381,678,1", "SHARP"),
                     ("majorexploiter", "0x019782cab5d844f02bafb71f512758be78579f3c", "100350,306,82,1", "SHARP"),
                 ]
-                cursor.executemany("INSERT INTO specialists (name, wallet_address, target_tags, tier) VALUES (?, ?, ?, ?)", defaults)
-                
+                # Seed defaults as INACTIVE by default — user explicitly enables from UI.
+                cursor.executemany(
+                    "INSERT INTO specialists (name, wallet_address, target_tags, tier, is_active) VALUES (?, ?, ?, ?, 0)",
+                    defaults,
+                )
+
+            # One-shot: for existing installs, deactivate all specialists so go-live
+            # is an explicit user action from the UI. Runs exactly once.
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS schema_migrations (
+                    key TEXT PRIMARY KEY,
+                    applied_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            cursor.execute("SELECT 1 FROM schema_migrations WHERE key = 'specialists_default_inactive'")
+            if cursor.fetchone() is None:
+                cursor.execute("UPDATE specialists SET is_active = 0")
+                cursor.execute("INSERT INTO schema_migrations (key) VALUES ('specialists_default_inactive')")
+
             # Server Heartbeat Table
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS server_status (

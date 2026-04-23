@@ -245,11 +245,24 @@ class PolymarketBot:
         if self.seen_positions:
             logging.info(f"🔄 Pre-seeded {len(self.seen_positions)} positions from existing DB trades")
 
-    def send_telegram_alert(self, message: str):
+    def send_telegram_alert(self, message: str, category: str = "general"):
         # Check DB config first; fall back to env var ENABLE_TELEGRAM (default on)
         db_enabled = self.db.get_config("enable_telegram", "1")
         env_enabled = os.environ.get("ENABLE_TELEGRAM", "true").lower()
         if db_enabled == "0" or env_enabled == "false":
+            return
+
+        # Per-category toggles. Defaults: buy/resolve/error ON; summary/skip OFF.
+        category_defaults = {
+            "buy": "1",
+            "resolve": "1",
+            "error": "1",
+            "summary": "0",
+            "skip": "0",
+            "general": "1",
+        }
+        default = category_defaults.get(category, "1")
+        if self.db.get_config(f"notify_{category}", default) == "0":
             return
 
         token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip("\"'")
@@ -363,7 +376,7 @@ class PolymarketBot:
                             f"💵 Bet: ${bet:.2f}",
                             f"💰 P&L: ${pnl:+.2f}",
                         ])
-                        self.send_telegram_alert(msg)
+                        self.send_telegram_alert(msg, category="resolve")
                         logging.info(f"{emoji} RESOLVED {trade['specialist']} | {trade['market']} | {result} | P&L ${pnl:+.2f}")
                         break
                         
@@ -388,7 +401,7 @@ class PolymarketBot:
                 f"👤 {trade['specialist']}",
                 f"💵 ${bet:.2f} freed up ({end_info})",
             ])
-            self.send_telegram_alert(msg)
+            self.send_telegram_alert(msg, category="resolve")
             logging.info(f"⏰ EXPIRED {trade['specialist']} | {trade['market']} | {end_info}")
 
         if expired_count > 0:
@@ -443,7 +456,7 @@ class PolymarketBot:
                 hour_key = (now_est.date(), now_est.hour)
                 if now_est.hour in SUMMARY_HOURS and hour_key not in sent_summary_for:
                     summary_msg = self.generate_hourly_summary()
-                    self.send_telegram_alert(summary_msg)
+                    self.send_telegram_alert(summary_msg, category="summary")
                     sent_summary_for.add(hour_key)
                     # Keep set small: clear entries older than today
                     sent_summary_for = {k for k in sent_summary_for if k[0] >= now_est.date()}
@@ -563,7 +576,7 @@ class PolymarketBot:
                                             "",
                                             link
                                         ])
-                                        self.send_telegram_alert(msg)
+                                        self.send_telegram_alert(msg, category="buy")
                                         logging.info(f"✅ COPIED TRADE {spec.name} | {market} | {outcome} @ ${current_market_price:.2f} | Bet ${bet_size:.2f} | Slippage {slippage:+.2f}% | Bal ${remaining:.2f}")
                                         
                                     elif status == "PERMANENT_REJECT":

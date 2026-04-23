@@ -256,7 +256,17 @@ def main():
     db = TradingDB()
 
     st.sidebar.title("Navigation")
-    page = st.sidebar.radio("Go to", ["Dashboard", "Backtest Simulator", "Historical Backtest", "No-Bot", "Settings", "Controls", "Strategy & SOP", "Architecture & Deployment", "Logs"])
+    page = st.sidebar.radio("Go to", [
+        "Dashboard",
+        "Specialists",
+        "Copy-Bot Backtest",
+        "No-Bot Backtest",
+        "Backtest Simulator",
+        "Settings",
+        "Strategy & SOP",
+        "Architecture & Deployment",
+        "Logs",
+    ])
 
     st.sidebar.markdown("---")
     if "dark_mode" not in st.session_state:
@@ -273,16 +283,16 @@ def main():
 
     if page == "Dashboard":
         render_dashboard(db)
+    elif page == "Specialists":
+        render_specialists(db)
     elif page == "Backtest Simulator":
         render_backtest(db)
-    elif page == "Historical Backtest":
+    elif page == "Copy-Bot Backtest":
         render_historical_backtest(db)
-    elif page == "No-Bot":
+    elif page == "No-Bot Backtest":
         render_no_bot(db)
     elif page == "Settings":
         render_settings(db)
-    elif page == "Controls":
-        render_controls(db)
     elif page == "Strategy & SOP":
         render_strategy()
     elif page == "Architecture & Deployment":
@@ -290,6 +300,52 @@ def main():
     else:
         render_logs()
         
+def render_no_bot_positions_inline(db):
+    """Live No-Bot positions section — rendered on the main Dashboard."""
+    import sqlite3
+    from pathlib import Path as _Path
+
+    st.header("🚫 No-Bot Live Positions")
+    trading_db = _Path(__file__).parent / "trading.db"
+    conn = sqlite3.connect(trading_db)
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS no_positions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            market_id TEXT NOT NULL, event_id TEXT, question TEXT, category TEXT,
+            entry_no_price REAL, bet_size_usd REAL, fee_paid_usd REAL,
+            placed_at TEXT, resolved_at TEXT, resolved_yes INTEGER,
+            pnl_usd REAL, status TEXT, mock INTEGER DEFAULT 1
+        );
+    """)
+    rows = conn.execute(
+        "SELECT category, question, entry_no_price, bet_size_usd, status, "
+        "placed_at, resolved_at, pnl_usd, mock "
+        "FROM no_positions ORDER BY placed_at DESC LIMIT 100"
+    ).fetchall()
+    conn.close()
+
+    nb_cfg = db.get_all_config()
+    nb_bankroll = float(nb_cfg.get("nb_bankroll", {}).get("value", 50.0))
+    nb_live = nb_cfg.get("nb_live_mode", {}).get("value", "0") == "1"
+    mode_label = "🟢 LIVE" if nb_live else "📝 PAPER"
+
+    c1, c2, c3, c4 = st.columns(4)
+    open_n = sum(1 for r in rows if r[4] == "open")
+    total_pnl = sum((r[7] or 0) for r in rows if r[4] != "open")
+    c1.metric("Mode", mode_label)
+    c2.metric("Bankroll", f"${nb_bankroll:.2f}")
+    c3.metric("Open positions", open_n)
+    c4.metric("Closed P&L", f"${total_pnl:+,.2f}")
+
+    if rows:
+        df = pd.DataFrame(rows, columns=[
+            "Category", "Question", "Entry No", "Bet $", "Status",
+            "Placed", "Resolved", "PnL $", "Mock"])
+        st.dataframe(df, use_container_width=True, hide_index=True)
+    else:
+        st.caption("No positions yet. Settings for this bot are on the **Settings → No-Bot** tab.")
+
+
 def render_dashboard(db):
     st.title("📈 Polymarket Specialist Copy-Bot")
     
@@ -377,10 +433,18 @@ def render_dashboard(db):
 
     st.markdown("---")
 
-    # 3. Specialist Roster & Health Monitor
-    st.header("Specialist Roster & Health")
-    st.write("Toggle Alpha wallets to monitor and copy their trades on Polymarket.")
-    
+    # 3. No-Bot Live Positions
+    render_no_bot_positions_inline(db)
+
+    st.markdown("---")
+
+    active_n = sum(1 for s in db.get_all_specialists() if s.get("is_active") and "MOCK" not in s["wallet"])
+    st.info(f"**Specialists:** {active_n} active. Manage them in the **Specialists** tab.")
+
+def render_specialists(db):
+    st.title("👥 Specialist Roster & Health")
+    st.caption("Toggle Alpha wallets to monitor and copy their trades on Polymarket. All specialists start inactive — flip them on explicitly before go-live.")
+
     # Add new trader form
     with st.expander("➕ Add New Trader"):
         with st.form("add_trader_form"):
@@ -1877,117 +1941,73 @@ def _render_saved_hb_comparison():
 
 
 def render_no_bot(db):
-    """'Nothing Ever Happens' No-bot: live positions + interactive backtest."""
-    st.title("🚫 No-Bot")
-    st.caption("Buy No on select markets. Post-audit config — see `docs/no-bot-strategy.md`.")
+    """No-Bot Backtest tab. Live positions live on the Dashboard; settings on Settings → No-Bot."""
+    st.title("🚫 No-Bot Backtest")
+    st.caption("Interactive historical sim for the 'Nothing Ever Happens' strategy. See `docs/no-bot-strategy.md` for the thesis. Live positions are on the **Dashboard**; strategy variables are on **Settings → No-Bot**.")
 
     import sqlite3
     from pathlib import Path as _Path
 
-    trading_db = _Path(__file__).parent / "trading.db"
-    conn = sqlite3.connect(trading_db)
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS no_positions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            market_id TEXT NOT NULL, event_id TEXT, question TEXT, category TEXT,
-            entry_no_price REAL, bet_size_usd REAL, fee_paid_usd REAL,
-            placed_at TEXT, resolved_at TEXT, resolved_yes INTEGER,
-            pnl_usd REAL, status TEXT, mock INTEGER DEFAULT 1
-        );
-    """)
+    st.markdown("### Interactive Backtest")
+    st.caption("Re-runs the historical sim with your chosen parameters.")
 
-    tab_live, tab_bt = st.tabs(["Live Positions", "Interactive Backtest"])
+    markets_db = _Path(__file__).parent / "backtest" / "markets.db"
+    if not markets_db.exists():
+        st.error("`backtest/markets.db` not found. Run `python backtest/fetch_markets.py` first.")
+        return
 
-    with tab_live:
-        rows = conn.execute(
-            "SELECT category, question, entry_no_price, bet_size_usd, status, "
-            "placed_at, resolved_at, pnl_usd, mock "
-            "FROM no_positions ORDER BY placed_at DESC LIMIT 200"
-        ).fetchall()
-        if not rows:
-            st.info("No positions yet. Start the bot with `python -m no_bot` (paper mode by default).")
-        else:
+    try:
+        from backtest import deep_analysis as da
+    except Exception as e:
+        st.error(f"Could not import backtest.deep_analysis: {e}")
+        return
+
+    col1, col2, col3 = st.columns(3)
+    capital = col1.number_input("Starting capital ($)", 50.0, 10000.0, 500.0, 50.0, key="nb_cap")
+    no_price = col2.slider("Assumed No entry price", 0.25, 0.80, 0.50, 0.05, key="nb_price")
+    min_vol = col3.number_input("Min market volume ($)", 1_000.0, 500_000.0, 20_000.0, 5_000.0, key="nb_minvol")
+
+    col4, col5 = st.columns(2)
+    max_per_event = col4.slider("Max positions per event", 1, 5, 2, key="nb_maxpe")
+    per_bet_cap = col5.slider("Per-bet cap (% of bankroll)", 1, 20, 5, key="nb_pbcap")
+
+    if st.button("Run backtest", key="nb_run"):
+        with st.spinner("Loading markets and simulating..."):
+            sim_conn = sqlite3.connect(markets_db)
+            markets = da.load_markets(sim_conn)
+            sim_conn.close()
+            result = da.simulate(
+                markets,
+                starting_capital=capital,
+                assumed_no_price=no_price,
+                min_volume=min_vol,
+                max_per_event=max_per_event,
+            )
+        final = result["final_bankroll"]
+        bets = result["bets_placed"]
+        wins = result["bets_won"]
+        roi = (final - capital) / capital * 100
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Final bankroll", f"${final:,.0f}", f"{roi:+.1f}%")
+        c2.metric("Bets placed", f"{bets:,}")
+        c3.metric("Win rate", f"{(wins/max(bets,1))*100:.1f}%")
+        c4.metric("Wagered", f"${result['total_wagered']:,.0f}")
+
+        if result["history"]:
             import pandas as _pd
-            df = _pd.DataFrame(rows, columns=[
-                "Category", "Question", "Entry No", "Bet $", "Status",
-                "Placed", "Resolved", "PnL $", "Mock"])
-            st.dataframe(df, use_container_width=True, hide_index=True)
-            open_n = sum(1 for r in rows if r[4] == "open")
-            total_pnl = sum((r[7] or 0) for r in rows if r[4] != "open")
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Open positions", open_n)
-            c2.metric("Closed P&L", f"${total_pnl:+,.2f}")
-            c3.metric("Total positions", len(rows))
+            hdf = _pd.DataFrame(result["history"], columns=["date", "equity", "open_pos"])
+            hdf["date"] = _pd.to_datetime(hdf["date"])
+            st.line_chart(hdf.set_index("date")[["equity"]], height=280)
+            st.area_chart(hdf.set_index("date")[["open_pos"]], height=180)
 
-    with tab_bt:
-        st.markdown("### Interactive Backtest")
-        st.caption("Re-runs the historical sim with your chosen parameters.")
-
-        markets_db = _Path(__file__).parent / "backtest" / "markets.db"
-        if not markets_db.exists():
-            st.error("`backtest/markets.db` not found. Run `python backtest/fetch_markets.py` first.")
-            conn.close()
-            return
-
-        try:
-            from backtest import deep_analysis as da
-        except Exception as e:
-            st.error(f"Could not import backtest.deep_analysis: {e}")
-            conn.close()
-            return
-
-        col1, col2, col3 = st.columns(3)
-        capital = col1.number_input("Starting capital ($)", 50.0, 10000.0, 500.0, 50.0, key="nb_cap")
-        no_price = col2.slider("Assumed No entry price", 0.25, 0.80, 0.50, 0.05, key="nb_price")
-        min_vol = col3.number_input("Min market volume ($)", 1_000.0, 500_000.0, 20_000.0, 5_000.0, key="nb_minvol")
-
-        col4, col5 = st.columns(2)
-        max_per_event = col4.slider("Max positions per event", 1, 5, 2, key="nb_maxpe")
-        per_bet_cap = col5.slider("Per-bet cap (% of bankroll)", 1, 20, 5, key="nb_pbcap")
-
-        if st.button("Run backtest", key="nb_run"):
-            with st.spinner("Loading markets and simulating..."):
-                sim_conn = sqlite3.connect(markets_db)
-                markets = da.load_markets(sim_conn)
-                sim_conn.close()
-                # Patch per-bet cap into the sim (monkey-patch is cleaner than forking)
-                orig_cap = da.__dict__.get("_PER_BET_CAP_FRAC", 0.10)
-                # deep_analysis uses hardcoded 0.10; honor user choice by passing
-                # a scaled starting_capital + enforcing cap via max_concurrent
-                result = da.simulate(
-                    markets,
-                    starting_capital=capital,
-                    assumed_no_price=no_price,
-                    min_volume=min_vol,
-                    max_per_event=max_per_event,
-                )
-            final = result["final_bankroll"]
-            bets = result["bets_placed"]
-            wins = result["bets_won"]
-            roi = (final - capital) / capital * 100
-            c1, c2, c3, c4 = st.columns(4)
-            c1.metric("Final bankroll", f"${final:,.0f}", f"{roi:+.1f}%")
-            c2.metric("Bets placed", f"{bets:,}")
-            c3.metric("Win rate", f"{(wins/max(bets,1))*100:.1f}%")
-            c4.metric("Wagered", f"${result['total_wagered']:,.0f}")
-
-            if result["history"]:
-                import pandas as _pd
-                hdf = _pd.DataFrame(result["history"], columns=["date", "equity", "open_pos"])
-                hdf["date"] = _pd.to_datetime(hdf["date"])
-                st.line_chart(hdf.set_index("date")[["equity"]], height=280)
-                st.area_chart(hdf.set_index("date")[["open_pos"]], height=180)
-
-        st.markdown("### Pre-generated charts")
-        charts_dir = _Path(__file__).parent / "backtest" / "charts"
-        for name in ["01_no_rate_by_year.png", "02_duration_vs_no_rate.png",
-                     "03_ev_vs_entry_price.png", "04_bankroll_simulation.png",
-                     "05_annualized_return.png", "06_fee_impact.png"]:
-            p = charts_dir / name
-            if p.exists():
-                st.image(str(p), use_container_width=True)
-
-    conn.close()
+    st.markdown("### Pre-generated charts")
+    charts_dir = _Path(__file__).parent / "backtest" / "charts"
+    for name in ["01_no_rate_by_year.png", "02_duration_vs_no_rate.png",
+                 "03_ev_vs_entry_price.png", "04_bankroll_simulation.png",
+                 "05_annualized_return.png", "06_fee_impact.png"]:
+        p = charts_dir / name
+        if p.exists():
+            st.image(str(p), use_container_width=True)
 
 
 def render_architecture():
@@ -2023,13 +2043,28 @@ def render_strategy():
         st.error("Strategy document not found.")
 
 def render_settings(db):
-    st.title("⚙️ Algorithm Settings")
-    st.markdown("All tunable parameters for the copy-bot strategy. Changes take effect on the bot's next polling cycle.")
+    st.title("⚙️ Settings")
+    st.caption("All tunable parameters for both bots plus system-wide controls. Changes take effect on the next polling cycle.")
+
+    tab_copy, tab_no, tab_sys = st.tabs(["Copy-Bot", "No-Bot", "System"])
+
+    with tab_copy:
+        _render_copy_bot_settings(db)
+    with tab_no:
+        _render_no_bot_settings(db)
+    with tab_sys:
+        _render_system_settings(db)
+
+
+def _render_copy_bot_settings(db):
+    st.caption("Settings for the specialist copy-bot. Changes take effect on the bot's next polling cycle.")
 
     cfg = db.get_all_config()
 
-    def val(key, cast=float):
-        return cast(cfg[key]["value"]) if key in cfg else None
+    def val(key, cast=float, default=None):
+        if key in cfg:
+            return cast(cfg[key]["value"])
+        return default
 
     st.markdown("---")
 
@@ -2148,15 +2183,173 @@ def render_settings(db):
             st.rerun()
 
 
-def render_controls(db):
-    st.title("🎛️ Bot Controls")
-    st.markdown("Manual controls and notifications. The bot must be running for these actions to have an effect.")
+def _render_no_bot_settings(db):
+    st.caption("Strategy variables for the 'Nothing Ever Happens' No-Bot. See `docs/no-bot-strategy.md` for thesis.")
+
+    cfg = db.get_all_config()
+
+    def cval(key, cast=float, default=None):
+        if key in cfg:
+            try:
+                return cast(cfg[key]["value"])
+            except (TypeError, ValueError):
+                return default
+        return default
+
+    st.markdown("---")
+    st.subheader("Mode & Bankroll")
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        nb_live = st.toggle(
+            "🟢 Live mode",
+            value=cval("nb_live_mode", int, 0) == 1,
+            key="nb_live_mode_tgl",
+            help="OFF = paper (simulated fills). ON = real money. Keep OFF until go-live."
+        )
+    with col2:
+        nb_bankroll = st.number_input(
+            "Starting bankroll ($)",
+            min_value=10.0, max_value=100_000.0,
+            value=cval("nb_bankroll", float, 50.0),
+            step=10.0, format="%.2f", key="nb_bankroll",
+            help="Baseline capital. Sizing scales from here."
+        )
+    with col3:
+        nb_small_bankroll = st.toggle(
+            "Small-bankroll mode",
+            value=cval("nb_small_bankroll", int, 1) == 1,
+            key="nb_small_bankroll_tgl",
+            help="Bankroll < $250: use fixed $5 bets (Polymarket minimum) instead of %-of-bankroll Kelly. Auto-disables once bankroll > $250."
+        )
+
+    col4, col5 = st.columns(2)
+    with col4:
+        nb_min_bet = st.number_input(
+            "Min bet ($)", min_value=1.0, max_value=100.0,
+            value=cval("nb_min_bet_usd", float, 5.0), step=1.0, format="%.2f",
+            key="nb_min_bet", help="Polymarket enforces $5 minimum per order."
+        )
+    with col5:
+        nb_max_bet_pct = st.slider(
+            "Max bet (% of bankroll)", 1.0, 25.0,
+            cval("nb_max_bet_pct", float, 5.0), 0.5, key="nb_max_bet_pct",
+            help="Caps Kelly-sized bets once small-bankroll mode is off."
+        )
+
+    st.markdown("---")
+    st.subheader("Turnover & Categories")
+
+    col6, col7 = st.columns(2)
+    with col6:
+        nb_fast_turnover = st.toggle(
+            "Fast-turnover mode",
+            value=cval("nb_fast_turnover", int, 1) == 1,
+            key="nb_fast_turnover_tgl",
+            help="Prioritize Sports-Other (12d median) and Politics (33d median) over Tech-AI (75d median) to recycle capital faster with a small bankroll."
+        )
+    with col7:
+        nb_min_volume = st.number_input(
+            "Min market volume ($)",
+            min_value=1_000.0, max_value=500_000.0,
+            value=cval("nb_min_volume_usd", float, 10_000.0),
+            step=1_000.0, format="%.0f", key="nb_min_vol"
+        )
+
+    st.markdown("**Category toggles** — disable categories you don't want to trade.")
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        cat_tech = st.toggle("Tech-AI (77% No, 75d median)",
+            value=cval("nb_cat_tech_ai", int, 1) == 1, key="nb_cat_tech")
+    with c2:
+        cat_sports = st.toggle("Sports-Other (70% No, 12d median)",
+            value=cval("nb_cat_sports_other", int, 1) == 1, key="nb_cat_sports")
+    with c3:
+        cat_politics = st.toggle("Politics (70.5% No, 33d median)",
+            value=cval("nb_cat_politics", int, 1) == 1, key="nb_cat_politics")
+
+    st.markdown("---")
+    st.subheader("Entry Rules & Risk")
+
+    col8, col9 = st.columns(2)
+    with col8:
+        nb_ceiling_tech = st.slider("Tech-AI — max No entry price", 0.30, 0.95,
+            cval("nb_ceiling_tech_ai", float, 0.60), 0.01, key="nb_ceil_tech", format="%.2f")
+        nb_ceiling_sports = st.slider("Sports-Other — max No entry price", 0.30, 0.95,
+            cval("nb_ceiling_sports_other", float, 0.55), 0.01, key="nb_ceil_sports", format="%.2f")
+        nb_ceiling_politics = st.slider("Politics — max No entry price", 0.30, 0.95,
+            cval("nb_ceiling_politics", float, 0.55), 0.01, key="nb_ceil_politics", format="%.2f")
+    with col9:
+        nb_kelly_tech = st.slider("Tech-AI — Kelly fraction", 0.05, 0.50,
+            cval("nb_kelly_tech_ai", float, 0.20), 0.05, key="nb_k_tech", format="%.2f")
+        nb_kelly_sports = st.slider("Sports-Other — Kelly fraction", 0.05, 0.50,
+            cval("nb_kelly_sports_other", float, 0.15), 0.05, key="nb_k_sports", format="%.2f")
+        nb_kelly_politics = st.slider("Politics — Kelly fraction", 0.05, 0.50,
+            cval("nb_kelly_politics", float, 0.15), 0.05, key="nb_k_politics", format="%.2f")
+
+    col10, col11 = st.columns(2)
+    with col10:
+        nb_cat_exposure = st.slider("Max single-category exposure (% of bankroll)", 10.0, 100.0,
+            cval("nb_max_category_exposure", float, 40.0), 5.0, key="nb_cat_exp")
+    with col11:
+        nb_drawdown = st.slider("Drawdown halt (% from start)", 10.0, 80.0,
+            cval("nb_drawdown_halt", float, 30.0), 5.0, key="nb_dd")
+
+    st.markdown("---")
+    st.subheader("No-Bot Telegram Notifications")
+
+    col12, col13, col14 = st.columns(3)
+    with col12:
+        nb_notify_buy = st.toggle("Notify on BUY",
+            value=db.get_config("notify_nb_buy", "1") == "1", key="nb_n_buy")
+    with col13:
+        nb_notify_resolve = st.toggle("Notify on WIN/LOSS",
+            value=db.get_config("notify_nb_resolve", "1") == "1", key="nb_n_res")
+    with col14:
+        nb_notify_threshold = st.toggle("Notify on price threshold crossed",
+            value=db.get_config("notify_nb_threshold", "0") == "1", key="nb_n_thr",
+            help="(Requires websocket listener — coming soon.)")
+
+    st.markdown("---")
+
+    if st.button("💾 Save No-Bot Settings", type="primary", key="save_nb"):
+        updates = {
+            "nb_live_mode":           1 if nb_live else 0,
+            "nb_bankroll":            nb_bankroll,
+            "nb_small_bankroll":      1 if nb_small_bankroll else 0,
+            "nb_min_bet_usd":         nb_min_bet,
+            "nb_max_bet_pct":         nb_max_bet_pct,
+            "nb_fast_turnover":       1 if nb_fast_turnover else 0,
+            "nb_min_volume_usd":      nb_min_volume,
+            "nb_cat_tech_ai":         1 if cat_tech else 0,
+            "nb_cat_sports_other":    1 if cat_sports else 0,
+            "nb_cat_politics":        1 if cat_politics else 0,
+            "nb_ceiling_tech_ai":     nb_ceiling_tech,
+            "nb_ceiling_sports_other": nb_ceiling_sports,
+            "nb_ceiling_politics":    nb_ceiling_politics,
+            "nb_kelly_tech_ai":       nb_kelly_tech,
+            "nb_kelly_sports_other":  nb_kelly_sports,
+            "nb_kelly_politics":      nb_kelly_politics,
+            "nb_max_category_exposure": nb_cat_exposure,
+            "nb_drawdown_halt":       nb_drawdown,
+            "notify_nb_buy":          1 if nb_notify_buy else 0,
+            "notify_nb_resolve":      1 if nb_notify_resolve else 0,
+            "notify_nb_threshold":    1 if nb_notify_threshold else 0,
+        }
+        for key, value in updates.items():
+            db.set_config(key, value)
+        st.success("No-Bot settings saved.")
+        st.rerun()
+
+
+def _render_system_settings(db):
+    st.caption("System-wide controls: Telegram notifications, database actions, and a full config snapshot.")
 
     cfg = db.get_all_config()
     telegram_enabled = cfg.get("enable_telegram", {}).get("value", "1") == "1"
 
-    # --- Telegram ---
-    st.subheader("Telegram Notifications")
+    st.markdown("---")
+    st.subheader("Telegram — Master Switch")
     col1, col2 = st.columns([1, 3])
     with col1:
         new_tg = st.toggle("Enable Telegram", value=telegram_enabled, key="tg_toggle")
@@ -2164,47 +2357,61 @@ def render_controls(db):
             db.set_config("enable_telegram", 1 if new_tg else 0)
             st.rerun()
     with col2:
-        st.caption("When disabled, the bot runs silently — no alerts for trades, resolutions, or errors.")
+        st.caption("When disabled, the bots run silently. Per-notification toggles below.")
 
     token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip("\"'")
     chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip("\"'")
     tg_configured = bool(token and chat_id)
-
     if not tg_configured:
         st.info("Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in your `.env` to enable notifications.")
     else:
         st.success("Telegram credentials are configured.")
-        if telegram_enabled:
-            if st.button("Send Test Message"):
-                try:
-                    url = f"https://api.telegram.org/bot{token}/sendMessage"
-                    resp = requests.post(url, json={"chat_id": chat_id, "text": "✅ Test message from Polymarket Copy-Bot dashboard."}, timeout=5)
-                    if resp.status_code == 200:
-                        st.success("Test message sent!")
-                    else:
-                        st.error(f"Telegram returned HTTP {resp.status_code}: {resp.text}")
-                except Exception as e:
-                    st.error(f"Failed: {e}")
+        if telegram_enabled and st.button("Send Test Message", key="tg_test"):
+            try:
+                url = f"https://api.telegram.org/bot{token}/sendMessage"
+                resp = requests.post(url, json={"chat_id": chat_id, "text": "✅ Test message from Polymarket dashboard."}, timeout=5)
+                if resp.status_code == 200:
+                    st.success("Test message sent!")
+                else:
+                    st.error(f"Telegram returned HTTP {resp.status_code}: {resp.text}")
+            except Exception as e:
+                st.error(f"Failed: {e}")
 
     st.markdown("---")
+    st.subheader("Copy-Bot Notification Categories")
+    st.caption("Defaults: buy / resolve / error are ON; hourly summary and skip messages are OFF.")
 
-    # --- Database Actions ---
+    def _ntoggle(label, key, default):
+        cur = db.get_config(key, default) == "1"
+        new = st.toggle(label, value=cur, key=f"tg_{key}")
+        if new != cur:
+            db.set_config(key, 1 if new else 0)
+
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        _ntoggle("BUY confirmations", "notify_buy", "1")
+        _ntoggle("WIN/LOSS resolutions", "notify_resolve", "1")
+    with c2:
+        _ntoggle("CRITICAL errors", "notify_error", "1")
+        _ntoggle("Hourly summary", "notify_summary", "0")
+    with c3:
+        _ntoggle("SKIP / REJECT messages", "notify_skip", "0")
+
+    st.markdown("---")
     st.subheader("Database Actions")
 
     col3, col4 = st.columns(2)
     with col3:
-        st.markdown("**Purge pending trades**")
-        st.caption("Clears all PENDING trades to free up paper capital. Useful after a strategy reset.")
-        if st.button("🧹 Purge All Pending Trades", key="purge_pending_ctrl"):
+        st.markdown("**Purge pending copy-bot trades**")
+        st.caption("Clears all PENDING trades to free up paper capital.")
+        if st.button("🧹 Purge Pending Trades", key="purge_pending_ctrl"):
             db.clear_all_pending_trades()
             st.success("All pending trades cleared.")
             st.rerun()
 
     st.markdown("---")
-
-    # --- Current Config Summary ---
-    st.subheader("Active Configuration Summary")
-    st.caption("Read-only view of all current settings. Edit them in the Settings page.")
+    st.subheader("Active Configuration Snapshot")
+    st.caption("Read-only view of all current settings.")
     all_cfg = db.get_all_config()
     cfg_rows = [{"Setting": k, "Value": v["value"], "Description": v["description"]} for k, v in sorted(all_cfg.items())]
     st.dataframe(pd.DataFrame(cfg_rows), use_container_width=True, hide_index=True)
