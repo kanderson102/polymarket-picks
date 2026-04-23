@@ -1970,6 +1970,9 @@ def render_no_bot(db):
     col4, col5 = st.columns(2)
     max_per_event = col4.slider("Max positions per event", 1, 5, 2, key="nb_maxpe")
     per_bet_cap = col5.slider("Per-bet cap (% of bankroll)", 1, 20, 5, key="nb_pbcap")
+    with col5:
+        min_meaningful = round(5.0 / (per_bet_cap / 100))
+        st.caption(f"⚠️ Has no effect below ~${min_meaningful} starting capital — the $5 Polymarket minimum bet overrides the cap at small bankrolls.")
 
     if st.button("Run backtest", key="nb_run"):
         with st.spinner("Loading markets and simulating..."):
