@@ -141,7 +141,8 @@ def simulate(markets: list[dict], starting_capital: float = 100.0,
              assumed_no_price: float = 0.50,
              min_volume: float = MIN_VOLUME_USD,
              max_concurrent: Optional[int] = None,
-             max_per_event: int = MAX_PER_EVENT) -> dict:
+             max_per_event: int = MAX_PER_EVENT,
+             per_bet_cap_frac: float = 0.10) -> dict:
     """
     Realistic sequential simulation with capital constraints.
     - Only bets on markets with volume >= min_volume (avoids illiquid micro-markets)
@@ -228,7 +229,7 @@ def simulate(markets: list[dict], starting_capital: float = 100.0,
                     continue
                 full_kelly = edge / win_payout
                 bet = base_bet_capital * full_kelly * kelly_frac
-                bet = max(MIN_BET, min(bet, bankroll, starting_capital * 0.10))
+                bet = max(MIN_BET, min(bet, bankroll, starting_capital * per_bet_cap_frac))
                 if bet > bankroll:
                     continue
 

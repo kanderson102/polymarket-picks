@@ -1982,6 +1982,7 @@ def render_no_bot(db):
                 assumed_no_price=no_price,
                 min_volume=min_vol,
                 max_per_event=max_per_event,
+                per_bet_cap_frac=per_bet_cap / 100.0,
             )
         final = result["final_bankroll"]
         bets = result["bets_placed"]
