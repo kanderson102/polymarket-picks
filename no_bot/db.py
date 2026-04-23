@@ -50,6 +50,52 @@ def open_positions(conn: sqlite3.Connection) -> list[dict]:
     ]
 
 
+def all_open_positions(conn: sqlite3.Connection) -> list[dict]:
+    rows = conn.execute(
+        "SELECT id, market_id, event_id, question, category, entry_no_price, "
+        "bet_size_usd, placed_at, mock "
+        "FROM no_positions WHERE status='open'"
+    ).fetchall()
+    return [
+        dict(id=r[0], market_id=r[1], event_id=r[2], question=r[3],
+             category=r[4], entry_no_price=r[5], bet_size_usd=r[6],
+             placed_at=r[7], mock=r[8])
+        for r in rows
+    ]
+
+
+def update_position_fill(
+    conn: sqlite3.Connection, position_id: int,
+    fill_price: float, filled_size_usd: float,
+) -> None:
+    """Update a position with the actual fill price and size after CLOB confirmation."""
+    conn.execute(
+        "UPDATE no_positions SET entry_no_price=?, bet_size_usd=? WHERE id=?",
+        (fill_price, filled_size_usd, position_id),
+    )
+    conn.commit()
+
+
+def close_position(
+    conn: sqlite3.Connection, position_id: int,
+    resolved_yes: int, pnl_usd: float, resolved_at: str,
+) -> None:
+    conn.execute(
+        "UPDATE no_positions SET status='closed', resolved_yes=?, pnl_usd=?, "
+        "resolved_at=? WHERE id=?",
+        (resolved_yes, pnl_usd, resolved_at, position_id),
+    )
+    conn.commit()
+
+
+def expire_position(conn: sqlite3.Connection, position_id: int) -> None:
+    conn.execute(
+        "UPDATE no_positions SET status='expired' WHERE id=?",
+        (position_id,),
+    )
+    conn.commit()
+
+
 def has_open_on_market(conn: sqlite3.Connection, market_id: str) -> bool:
     row = conn.execute(
         "SELECT 1 FROM no_positions WHERE market_id=? AND status='open' LIMIT 1",

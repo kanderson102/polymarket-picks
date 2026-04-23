@@ -15,6 +15,8 @@ from typing import Iterable, Optional
 
 import requests
 
+from datetime import datetime
+
 from .config import EXCLUDED_CATEGORIES
 from .runtime import RuntimeConfig, load as load_runtime
 
@@ -137,6 +139,16 @@ def find_candidates(max_events: int = 500, rc: RuntimeConfig | None = None) -> l
                 # Skip markets already resolved or marked closed
                 if market.get("closed") or market.get("archived"):
                     continue
+                # Skip short-fuse markets — need ≥3 days for the order to fill
+                # and to match the time horizon the base rates were measured on.
+                end_date_str = (event.get("endDate") or "")[:10]
+                if end_date_str:
+                    try:
+                        days_left = (datetime.strptime(end_date_str, "%Y-%m-%d") - datetime.now()).days
+                        if days_left < 3:
+                            continue
+                    except ValueError:
+                        pass
 
                 candidates.append({
                     "market_id": str(market.get("id", "")),
