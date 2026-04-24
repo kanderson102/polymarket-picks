@@ -433,6 +433,20 @@ class PolymarketBot:
         logging.info("🔌 WebSocket listener started as background monitor")
 
     def monitor_loop(self):
+        # Copy-bot is deprioritized; the no-bot (`python -m no_bot`) is the active strategy.
+        # When disabled, this loop only writes heartbeats so the dashboard's server_status
+        # row stays fresh. Re-enable with COPY_BOT_ENABLED=true in .env.
+        copy_bot_enabled = os.environ.get("COPY_BOT_ENABLED", "false").lower() == "true"
+
+        if not copy_bot_enabled:
+            logging.info("Copy-bot disabled (COPY_BOT_ENABLED=false). Heartbeat-only mode.")
+            while True:
+                try:
+                    self.db.record_heartbeat()
+                except Exception as e:
+                    logging.error(f"Heartbeat failed: {e}")
+                time.sleep(60)
+
         logging.info("Starting real-time polling loop with WebSocket fallback...")
         # self.send_telegram_alert("🚀 Polymarket Copy-Bot Started and Monitoring!")  # server status notifications temporarily disabled
         EST = timezone(timedelta(hours=-5))

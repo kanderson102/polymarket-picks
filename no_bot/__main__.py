@@ -14,13 +14,14 @@ import logging
 import time
 from datetime import datetime, timezone
 
-from . import db
+from . import alerts, db
 from .config import RESOLVE_INTERVAL_SEC, SCAN_INTERVAL_SEC
 from .executor import DRY_RUN, place_no_order
 from .resolver import resolve_all
 from .runtime import load as load_runtime
 from .scanner import find_candidates
 from .sizer import can_open, kelly_size
+from .ws_entry import WSEntryGate
 
 logging.basicConfig(
     level=logging.INFO,
@@ -30,32 +31,61 @@ log = logging.getLogger("no_bot")
 
 
 def _check_drawdown(conn, rc) -> bool:
-    """Return True if trading should halt due to drawdown, False if ok to trade."""
+    """Return True if trading should halt due to drawdown, False if ok to trade.
+
+    Combines closed (realized) P&L with mark-to-market unrealized P&L on open
+    live positions. Unrealized uses last_known_no_price stashed by the resolver
+    on its 10-min pass; if absent, falls back to entry price (zero unrealized).
+    """
     realized_pnl = conn.execute(
         "SELECT COALESCE(SUM(pnl_usd), 0) FROM no_positions "
         "WHERE status='closed' AND mock=0"
     ).fetchone()[0]
 
-    if realized_pnl >= 0:
+    open_rows = conn.execute(
+        "SELECT entry_no_price, bet_size_usd, last_known_no_price "
+        "FROM no_positions WHERE status='open' AND mock=0"
+    ).fetchall()
+    unrealized = 0.0
+    for entry, bet, last in open_rows:
+        if not entry or not bet or last is None:
+            continue
+        # P&L = bet * (last/entry - 1). Negative when No price has dropped
+        # below our entry — i.e. the market is now more bullish on Yes.
+        unrealized += float(bet) * (float(last) / float(entry) - 1.0)
+
+    total_loss = realized_pnl + unrealized
+    if total_loss >= 0:
         return False
 
-    loss_frac = abs(realized_pnl) / rc.bankroll
+    loss_frac = abs(total_loss) / rc.bankroll
     if loss_frac >= rc.drawdown_halt:
         log.warning(
-            "🛑 DRAWDOWN HALT: realized loss $%.2f = %.1f%% of bankroll "
-            "(threshold %.0f%%) — no new positions until reviewed",
-            abs(realized_pnl), loss_frac * 100, rc.drawdown_halt * 100,
+            "🛑 DRAWDOWN HALT: total loss $%.2f (realized $%.2f + unrealized $%.2f) = "
+            "%.1f%% of bankroll (threshold %.0f%%) — no new positions until reviewed",
+            abs(total_loss), realized_pnl, unrealized, loss_frac * 100, rc.drawdown_halt * 100,
         )
+        alerts.drawdown_halt(abs(total_loss), rc.drawdown_halt * 100)
         return True
     return False
 
 
+_GATE = WSEntryGate()
+
+
 def run_scan() -> None:
+    scan_start = time.monotonic()
+    scan_ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
     rc = load_runtime()
     conn = db.connect()
 
     # ── Drawdown check ────────────────────────────────────────────────────────
     if rc.live and _check_drawdown(conn, rc):
+        db.record_scan(
+            conn, ts=scan_ts, events_seen=0, candidates_found=0,
+            positions_entered=0, duration_ms=int((time.monotonic() - scan_start) * 1000),
+            error="drawdown halt",
+        )
         conn.close()
         return
 
@@ -76,11 +106,19 @@ def run_scan() -> None:
         rc.small_bankroll_mode, rc.fast_turnover,
     )
 
-    candidates = find_candidates(rc=rc)
-    log.info("candidates=%d", len(candidates))
+    evaluations: list[dict] = []
+    candidates = find_candidates(rc=rc, evaluations=evaluations)
 
+    # WS gate decides which in-range candidates are ready to enter NOW
+    # (dip detected, watch-time exceeded, or deadline approaching).
+    # Markets that aren't ready stay on the watchlist and are re-checked
+    # next cycle. See no_bot/ws_entry.py for the trigger logic.
+    ready = _GATE.evaluate(candidates)
+    log.info("candidates=%d ready=%d", len(candidates), len(ready))
+
+    positions_entered = 0
     remaining = rc.bankroll
-    for c in candidates:
+    for c in ready:
         if db.has_open_on_market(conn, c["market_id"]):
             continue
 
@@ -141,11 +179,26 @@ def run_scan() -> None:
             mock=is_mock,
         )
 
+        alerts.entry(
+            question=c["question"], category=c["category"],
+            no_price=actual_price, bet_usd=actual_bet, mock=is_mock,
+        )
+        _GATE.unwatch(c["market_id"])
         remaining -= actual_bet
         deployed += actual_bet
+        positions_entered += 1
         if c["event_id"]:
             by_event[c["event_id"]] = by_event.get(c["event_id"], 0) + 1
         by_category[c["category"]] = by_category.get(c["category"], 0.0) + actual_bet
+
+    # Record telemetry so the dashboard can show "scanner is alive"
+    events_seen = len({e.get("event_id") for e in evaluations if e.get("event_id")})
+    db.record_scan(
+        conn, ts=scan_ts, events_seen=events_seen,
+        candidates_found=len(candidates), positions_entered=positions_entered,
+        duration_ms=int((time.monotonic() - scan_start) * 1000),
+    )
+    db.replace_scan_candidates(conn, scan_ts, evaluations)
 
     conn.close()
 
@@ -163,6 +216,7 @@ def main() -> None:
         "No-bot starting. DRY_RUN=%s  Config loaded from trading.db each scan.",
         DRY_RUN,
     )
+    _GATE.start()
     if DRY_RUN:
         log.info(
             "Set NO_BOT_DRY_RUN=false in .env to submit real orders. "
@@ -174,8 +228,22 @@ def main() -> None:
     while True:
         try:
             run_scan()
-        except Exception:
+        except Exception as e:
             log.exception("scan iteration failed")
+            err_text = f"{type(e).__name__}: {e}"
+            # Record the failure so the dashboard can flag a dead scanner.
+            try:
+                err_conn = db.connect()
+                db.record_scan(
+                    err_conn,
+                    ts=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                    events_seen=0, candidates_found=0, positions_entered=0,
+                    duration_ms=0, error=err_text[:200],
+                )
+                err_conn.close()
+            except Exception:
+                log.exception("failed to record scan error")
+            alerts.scanner_error(err_text)
 
         now = time.time()
         if now - last_resolve >= RESOLVE_INTERVAL_SEC:

@@ -93,13 +93,44 @@ def _parse_no_ask(market: dict) -> Optional[float]:
         return None
 
 
-def find_candidates(max_events: int = 500, rc: RuntimeConfig | None = None) -> list[dict]:
-    """Return a list of candidate-market dicts ready for sizing & execution."""
+def _parse_no_token_id(market: dict) -> Optional[str]:
+    """Return the ERC-1155 token id for the No outcome (used for CLOB + WS subs)."""
+    try:
+        outcomes = json.loads(market.get("outcomes", "[]"))
+        token_ids = json.loads(market.get("clobTokenIds", "[]"))
+    except (json.JSONDecodeError, TypeError):
+        return None
+    if len(outcomes) != 2 or len(token_ids) != 2:
+        return None
+    lowered = [o.lower() for o in outcomes]
+    if "no" not in lowered:
+        return None
+    return str(token_ids[lowered.index("no")])
+
+
+def find_candidates(
+    max_events: int = 500,
+    rc: RuntimeConfig | None = None,
+    evaluations: list[dict] | None = None,
+) -> list[dict]:
+    """Return a list of candidate-market dicts ready for sizing & execution.
+
+    If `evaluations` is supplied, every in-scope market we see (category in
+    CATEGORY_CONFIG and event is a binary matchup) is appended as a dict
+    describing the outcome — `passed=True` for candidates that reach the
+    final list, or `passed=False` with a `reject_reason` string otherwise.
+    Out-of-scope events (wrong category, bracket events) are omitted from
+    the evaluations list to keep it readable. Used by the dashboard feed.
+    """
     if rc is None:
         rc = load_runtime()
     candidates: list[dict] = []
     seen_events = 0
     offset = 0
+
+    def _log_eval(**kw):
+        if evaluations is not None:
+            evaluations.append(kw)
 
     while seen_events < max_events:
         try:
@@ -131,34 +162,53 @@ def find_candidates(max_events: int = 500, rc: RuntimeConfig | None = None) -> l
             event_id = str(event.get("id", ""))
             for market in event_markets:
                 volume = float(market.get("volumeNum", 0) or 0)
-                if volume < rc.min_volume_usd:
-                    continue
                 no_price = _parse_no_ask(market)
-                if no_price is None or no_price > rule.ceiling:
-                    continue
-                # Skip markets already resolved or marked closed
-                if market.get("closed") or market.get("archived"):
-                    continue
-                # Skip short-fuse markets — need ≥3 days for the order to fill
-                # and to match the time horizon the base rates were measured on.
                 end_date_str = (event.get("endDate") or "")[:10]
+                base_eval = dict(
+                    event_id=event_id,
+                    market_id=str(market.get("id", "")),
+                    question=market.get("question", ""),
+                    category=category,
+                    no_price=no_price,
+                    volume_usd=volume,
+                    end_date=end_date_str,
+                )
+
+                if market.get("closed") or market.get("archived"):
+                    _log_eval(**base_eval, passed=False, reject_reason="closed/archived")
+                    continue
+                if no_price is None:
+                    _log_eval(**base_eval, passed=False, reject_reason="no-price unavailable")
+                    continue
+                if volume < rc.min_volume_usd:
+                    _log_eval(**base_eval, passed=False,
+                              reject_reason=f"volume ${volume:,.0f} < ${rc.min_volume_usd:,.0f}")
+                    continue
+                if no_price > rule.ceiling:
+                    _log_eval(**base_eval, passed=False,
+                              reject_reason=f"No={no_price:.3f} > ceiling {rule.ceiling:.2f}")
+                    continue
                 if end_date_str:
                     try:
                         days_left = (datetime.strptime(end_date_str, "%Y-%m-%d") - datetime.now()).days
                         if days_left < 3:
+                            _log_eval(**base_eval, passed=False,
+                                      reject_reason=f"only {days_left}d to resolution")
                             continue
                     except ValueError:
                         pass
 
+                _log_eval(**base_eval, passed=True, reject_reason=None)
                 candidates.append({
                     "market_id": str(market.get("id", "")),
                     "condition_id": market.get("conditionId"),
+                    "no_token_id": _parse_no_token_id(market),
                     "event_id": event_id,
                     "question": market.get("question", ""),
                     "category": category,
                     "no_price": no_price,
                     "volume": volume,
-                    "end_date": (event.get("endDate") or "")[:10],
+                    "end_date": end_date_str,
                 })
         offset += len(events)
         if len(events) < 100:

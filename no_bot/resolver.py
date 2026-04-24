@@ -57,6 +57,17 @@ def _resolve_one(conn, pos: dict, now: datetime, resolved_n: int, expired_n: int
     resp.raise_for_status()
     market = resp.json()
 
+    # Stash current No price for mark-to-market drawdown accounting.
+    import json as _json
+    try:
+        outs = _json.loads(market.get("outcomes", "[]"))
+        prs = _json.loads(market.get("outcomePrices", "[]"))
+        if len(outs) == 2 and len(prs) == 2 and "no" in [o.lower() for o in outs]:
+            no_idx = [o.lower() for o in outs].index("no")
+            db.update_last_known_price(conn, pos["id"], float(prs[no_idx]))
+    except (ValueError, TypeError):
+        pass
+
     resolved = market.get("resolved", False)
     archived = market.get("archived", False)
 

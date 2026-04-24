@@ -300,6 +300,92 @@ def main():
     else:
         render_logs()
         
+def _render_no_bot_scanner_status(conn):
+    """Heartbeat strip: is the scanner alive, and what is it seeing?"""
+    from datetime import datetime, timezone as _tz
+    st.subheader("🛰️ Scanner status")
+
+    row = conn.execute(
+        "SELECT ts, events_seen, candidates_found, positions_entered, "
+        "duration_ms, error "
+        "FROM no_bot_scan_log ORDER BY id DESC LIMIT 1"
+    ).fetchone()
+
+    if not row:
+        st.warning("No scan recorded yet. If the no-bot was just started, wait ~5 min. "
+                   "Otherwise check `docker logs` — the scanner may not be running.")
+        return
+
+    ts, events_seen, cands, entered, dur_ms, err = row
+
+    # Parse ts and compute age
+    try:
+        t = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=_tz.utc)
+        age_sec = (datetime.now(_tz.utc) - t).total_seconds()
+    except Exception:
+        age_sec = None
+
+    if age_sec is None:
+        age_label = ts
+        health = "⚪"
+    elif age_sec < 360:         # ≤ 6 min — healthy (scan interval is 5 min)
+        health = "🟢"
+        age_label = f"{int(age_sec)}s ago"
+    elif age_sec < 900:         # ≤ 15 min — warning
+        health = "🟡"
+        age_label = f"{int(age_sec/60)}m ago"
+    else:
+        health = "🔴"
+        age_label = f"{int(age_sec/60)}m ago"
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Last scan", age_label, health)
+    c2.metric("Events seen", f"{events_seen:,}")
+    c3.metric("In range", f"{cands}")
+    c4.metric("Entered this scan", f"{entered}")
+
+    if err:
+        st.error(f"Last scan error: {err}")
+    else:
+        st.caption(f"Scan at {ts} took {dur_ms}ms. Scanner runs every 5 min.")
+
+
+def _render_no_bot_candidate_feed(conn):
+    """What did the scanner see on its last pass? Pass + fail with reason."""
+    rows = conn.execute(
+        "SELECT question, category, no_price, volume_usd, end_date, "
+        "passed, reject_reason "
+        "FROM no_bot_scan_candidates ORDER BY passed DESC, no_price ASC"
+    ).fetchall()
+
+    with st.expander(f"📡 Latest scanner pass — {len(rows)} in-scope markets evaluated", expanded=False):
+        if not rows:
+            st.caption("No evaluations yet. Either the scanner hasn't run, or no markets "
+                       "in our 3 categories (Tech-AI / Politics / Sports-Other) are open right now.")
+            return
+
+        passed = sum(1 for r in rows if r[5])
+        st.caption(
+            f"✅ **{passed} passed** all filters (in range, ready to enter) · "
+            f"❌ **{len(rows) - passed} rejected**. "
+            f"Columns: market, category, current No price, lifetime volume, resolution date, "
+            f"verdict."
+        )
+
+        import pandas as _pd
+        df = _pd.DataFrame(rows, columns=[
+            "Market", "Category", "No", "Volume $", "Ends", "Passed", "Reject reason"
+        ])
+        df["Verdict"] = df["Passed"].map(lambda p: "✅" if p else "❌")
+        df["No"] = df["No"].map(lambda x: f"{x:.3f}" if x is not None else "—")
+        df["Volume $"] = df["Volume $"].map(lambda v: f"${v:,.0f}" if v else "—")
+        df["Reason"] = df["Reject reason"].fillna("—")
+        df = df[["Verdict", "Category", "Market", "No", "Volume $", "Ends", "Reason"]]
+        st.dataframe(df, use_container_width=True, hide_index=True)
+
+
 def render_no_bot_positions_inline(db):
     """Live No-Bot positions section — rendered on the main Dashboard."""
     import sqlite3
@@ -316,7 +402,24 @@ def render_no_bot_positions_inline(db):
             placed_at TEXT, resolved_at TEXT, resolved_yes INTEGER,
             pnl_usd REAL, status TEXT, mock INTEGER DEFAULT 1
         );
+        CREATE TABLE IF NOT EXISTS no_bot_scan_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts TEXT NOT NULL, events_seen INTEGER NOT NULL DEFAULT 0,
+            candidates_found INTEGER NOT NULL DEFAULT 0,
+            positions_entered INTEGER NOT NULL DEFAULT 0,
+            duration_ms INTEGER NOT NULL DEFAULT 0, error TEXT
+        );
+        CREATE TABLE IF NOT EXISTS no_bot_scan_candidates (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            scan_ts TEXT NOT NULL, event_id TEXT, market_id TEXT,
+            question TEXT, category TEXT, no_price REAL, volume_usd REAL,
+            end_date TEXT, passed INTEGER NOT NULL, reject_reason TEXT
+        );
     """)
+
+    _render_no_bot_scanner_status(conn)
+    _render_no_bot_candidate_feed(conn)
+    st.markdown("---")
     rows = conn.execute(
         "SELECT category, question, entry_no_price, bet_size_usd, status, "
         "placed_at, resolved_at, pnl_usd, mock "
