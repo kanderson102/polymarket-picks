@@ -107,7 +107,8 @@ def run_scan() -> None:
     )
 
     evaluations: list[dict] = []
-    candidates = find_candidates(rc=rc, evaluations=evaluations)
+    scan_stats: dict = {}
+    candidates = find_candidates(rc=rc, evaluations=evaluations, stats=scan_stats)
 
     # WS gate decides which in-range candidates are ready to enter NOW
     # (dip detected, watch-time exceeded, or deadline approaching).
@@ -192,11 +193,13 @@ def run_scan() -> None:
         by_category[c["category"]] = by_category.get(c["category"], 0.0) + actual_bet
 
     # Record telemetry so the dashboard can show "scanner is alive"
-    events_seen = len({e.get("event_id") for e in evaluations if e.get("event_id")})
     db.record_scan(
-        conn, ts=scan_ts, events_seen=events_seen,
-        candidates_found=len(candidates), positions_entered=positions_entered,
+        conn, ts=scan_ts,
+        events_seen=scan_stats.get("seen_events", 0),
+        candidates_found=len(candidates),
+        positions_entered=positions_entered,
         duration_ms=int((time.monotonic() - scan_start) * 1000),
+        error=("Gamma fetch failed" if scan_stats.get("fetch_failed") else None),
     )
     db.replace_scan_candidates(conn, scan_ts, evaluations)
 

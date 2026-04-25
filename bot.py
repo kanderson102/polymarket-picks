@@ -141,8 +141,9 @@ def get_wallet_balance() -> float:
         return _balance_cache["value"]
     
     rpc_url = os.environ.get("ALCHEMY_POLYGON_URL", "")
-    wallet = os.environ.get("BOT_WALLET_ADDRESS", "")
-    
+    wallet = os.environ.get("BOT_WALLET_ADDRESS", "").strip().strip("\"'")
+    rpc_url = (rpc_url or "").strip().strip("\"'")
+
     if not rpc_url or not wallet:
         logging.warning("Missing ALCHEMY_POLYGON_URL or BOT_WALLET_ADDRESS — cannot query balance")
         return 0.0

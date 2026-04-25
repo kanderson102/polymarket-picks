@@ -112,6 +112,7 @@ def find_candidates(
     max_events: int = 500,
     rc: RuntimeConfig | None = None,
     evaluations: list[dict] | None = None,
+    stats: dict | None = None,
 ) -> list[dict]:
     """Return a list of candidate-market dicts ready for sizing & execution.
 
@@ -126,6 +127,11 @@ def find_candidates(
         rc = load_runtime()
     candidates: list[dict] = []
     seen_events = 0
+    in_scope_events = 0
+    multi_market_events = 0
+    excluded_category_events = 0
+    fetch_pages = 0
+    fetch_failed = False
     offset = 0
 
     def _log_eval(**kw):
@@ -135,8 +141,10 @@ def find_candidates(
     while seen_events < max_events:
         try:
             events = fetch_open_events(offset=offset)
+            fetch_pages += 1
         except requests.RequestException as e:
             log.warning("Gamma fetch failed at offset %d: %s", offset, e)
+            fetch_failed = True
             break
         if not events:
             break
@@ -146,6 +154,7 @@ def find_candidates(
             tags = [str(t["id"]) for t in event.get("tags", []) if isinstance(t, dict)]
             category = categorize(tags)
             if category in EXCLUDED_CATEGORIES or category not in rc.categories:
+                excluded_category_events += 1
                 continue
 
             # Binary-matchup-only rule. Our base rates are measured on events
@@ -156,7 +165,9 @@ def find_candidates(
             # the base rate against us. Skip multi-market events entirely.
             event_markets = event.get("markets", [])
             if len(event_markets) != 1:
+                multi_market_events += 1
                 continue
+            in_scope_events += 1
 
             rule = rc.categories[category]
             event_id = str(event.get("id", ""))
@@ -217,5 +228,20 @@ def find_candidates(
     if rc.fast_turnover:
         candidates.sort(key=lambda c: _FAST_TURNOVER_RANK.get(c["category"], 99))
 
-    log.info("Scanner found %d candidates from %d events", len(candidates), seen_events)
+    if stats is not None:
+        stats.update(
+            seen_events=seen_events,
+            in_scope_events=in_scope_events,
+            multi_market_events=multi_market_events,
+            excluded_category_events=excluded_category_events,
+            fetch_pages=fetch_pages,
+            fetch_failed=fetch_failed,
+        )
+
+    log.info(
+        "Scanner: fetched %d events across %d pages "
+        "(in-scope=%d, excluded-category=%d, multi-market=%d) → %d candidates",
+        seen_events, fetch_pages, in_scope_events,
+        excluded_category_events, multi_market_events, len(candidates),
+    )
     return candidates
