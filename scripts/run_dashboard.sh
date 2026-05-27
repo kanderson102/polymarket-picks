@@ -5,4 +5,4 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 source .venv/bin/activate
-exec streamlit run app.py --server.port "${PORT:-8501}" --server.address 0.0.0.0
+exec streamlit run streamlit_app.py --server.port "${PORT:-8501}" --server.address 0.0.0.0

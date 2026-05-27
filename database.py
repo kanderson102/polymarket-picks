@@ -54,10 +54,10 @@ class TradingDB:
                 )
             """)
             
-            # Initialize performance row if it doesn't exist (assuming Phase 1 starting at $50)
+            # Initialize performance row if it doesn't exist (assuming Phase 1 starting at $100)
             cursor.execute("""
                 INSERT OR IGNORE INTO performance (id, baseline, total_harvested)
-                VALUES (1, 50.0, 0.0)
+                VALUES (1, 100.0, 0.0)
             """)
             
             # Specialists Table

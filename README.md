@@ -1,204 +1,223 @@
-# Polymarket Copy-Bot
+# 📡 Polymarket Picks: Copy-Bot & No-Bot Command Dashboard
 
-An automated copy-trading bot for [Polymarket](https://polymarket.com) that mirrors the trades of hand-picked high-performing specialists. Built with Python, Streamlit, and Web3.
+View demo app here: [polymarket-picks.streamlit.app](https://polymarket-picks.streamlit.app/)
 
-> **Status**: Research / paper-trading. The bot detects real positions and records them locally, but live order execution is not yet wired up. It's fully functional as a paper-trading simulator and strategy sandbox.
+An automated prediction market trading terminal and strategy sandbox for [Polymarket](https://polymarket.com). Built with Python, Streamlit, and SQLite.
 
----
-
-## Features
-
-- **Specialist copy-trading** — monitor multiple wallet addresses and automatically replicate their positions
-- **Dynamic position sizing** — graduated Kelly-style bet percentages that taper as the bankroll grows
-- **Win-rate health monitor** — specialists with falling win rates are put on probation and skipped
-- **Adaptive value caps** — reject entries above a configurable max price (e.g. 0.82 for sports, 0.75 for politics)
-- **No-chase slippage guard** — skip any trade where the current price has drifted more than X% from the specialist's entry
-- **2× harvest rule** — when the wallet doubles, sweep half the profit to a separate wallet automatically
-- **Monte Carlo backtest** — simulate strategy performance over hundreds of runs with tunable parameters
-- **Historical backtest** — replay actual Polymarket activity data for each specialist
-- **Streamlit dashboard** — live trade log, specialist roster, balance charts, settings UI
-- **Telegram alerts** — trade confirmations, resolutions, hourly summaries, error notifications
-- **Fully configurable via UI** — every algorithm parameter is editable from the Settings page without touching code
+This project implements two core trading strategies:
+1. **🤖 Specialist Copy-Trading**: Monitors high-performing "alpha" wallets on Polymarket and replicates their orders using fractional Kelly bet sizing, adaptive value caps, slippage guards, and a profit-harvesting rule.
+2. **🚫 'Nothing Ever Happens' No-Bot**: Scans high-volume binary matchup markets in Tech/AI, Politics, and Sports, and automatically enters "No" positions on low-probability/high-premium events.
 
 ---
 
-## Screenshots
+## ⚡ Live Demo (Sandbox Mode)
 
-_Screenshots coming soon — see the [`docs/`](docs/) folder._
+The dashboard includes a built-in **Sandbox Demo Mode**. If you run the application without a `.env` file (or set the environment variable `DEMO_MODE=true`), the app will automatically seed the local database with 30 days of realistic mock data. 
 
----
-
-## How it Works
-
-```
-Polymarket Data API
-      │
-      ▼
- Bot polls each specialist wallet every N seconds
-      │
-      ├─► New position detected?
-      │         │
-      │         ├─► Health checks (win rate, value cap, slippage, liquidity)
-      │         │
-      │         └─► PASS → record trade, send Telegram alert
-      │
-      └─► Pending trade resolved? → update result, send alert
-```
-
-The bot never holds positions itself — in paper-trading mode it records them to a local SQLite database. Live execution would be added by wiring in the Polymarket CLOB API signing logic.
+In Demo Mode:
+- Live Web3 queries are safely mocked.
+- No real trades or transactions are executed.
+- The dashboard is pre-populated with a sample portfolio, balance charts, activity logs, and active positions.
+- The **No-Bot Backtest** automatically runs on simulated historical markets if the 100MB markets database is not downloaded.
 
 ---
 
-## Specialist Tiers
+## 🚀 Key Features
 
-| Tier | Strategy | Default Bet % | Min Win Rate |
-|------|----------|--------------|--------------|
-| **SHARP** | Volume grinders, 55%+ win rate, hundreds of picks | 5% / 3% / 1.5% (by bankroll) | 55% |
-| **WHALE** | Swing traders, high-conviction long shots | 3% / 2% / 1% (by bankroll) | 40% |
+### 1. Specialist Copy-Trading Bot
+- **Roster Management**: Manage active specialist wallets directly from the UI.
+- **Probation Guard**: Automatically puts specialists on probation and skips their trades if their 10-trade win rate falls below a set threshold (e.g. 55% for SHARP, 40% for WHALE).
+- **Conviction Sizing**: Adjusts copy bet size based on the specialist's relative allocation size and historical performance.
+- **2x profit harvesting**: Automatically sweeps 50% of profits to a personal cold wallet when the trading bankroll doubles.
 
-Bet percentages taper automatically as the bankroll grows to prevent oversized positions.
-
----
-
-## Algorithm Parameters
-
-All parameters are tunable from the **Settings** page in the dashboard — no code edits needed.
-
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| SHARP bet % (< $200) | 5% | Bet size for SHARP specialists when balance is small |
-| SHARP bet % ($200–$999) | 3% | Mid-tier bankroll sizing |
-| SHARP bet % (≥ $1000) | 1.5% | High-bankroll sizing |
-| WHALE bet % (< $200) | 3% | WHALE small bankroll |
-| WHALE bet % ($200–$999) | 2% | WHALE mid bankroll |
-| WHALE bet % (≥ $1000) | 1% | WHALE large bankroll |
-| Win rate multiplier | win_rate / 50 | Scales bet size by specialist performance |
-| SHARP min win rate | 55% | Below this → probation |
-| WHALE min win rate | 40% | Below this → probation |
-| Value cap — Sports | 0.82 | Max entry price for sports markets |
-| Value cap — Politics | 0.75 | Max entry price for politics/elections |
-| Slippage threshold | 2.5% | Max price drift from specialist's entry before skipping |
-| Liquidity multiple | 2× | Required order book depth vs bet size |
-| Harvest trigger | 2× baseline | When to sweep profits |
-| Harvest transfer | 50% | % of profit to send to main wallet |
-| Min wallet buffer | $5 | Always keep this much in reserve |
-| Max days — Sports | 60 days | Skip markets expiring too far out |
-| Max days — Non-sports | 90 days | |
-| Poll interval | 30 s | Seconds between API checks |
-| Enable tag filter | Off | Strict domain enforcement per specialist |
+### 2. No-Bot "Nothing Ever Happens" Scanner
+- **Automated Scanner**: Periodically polls the Polymarket CLOB for candidate binary markets.
+- **Category Filter**: Focuses on categories with statistically proven edges (Tech-AI, Politics, Sports-Other).
+- **Interactive Backtester**: Re-run historical simulations with tunable bankroll, Ceilings, and volume thresholds.
 
 ---
 
-## Setup
+## 🖼️ Dashboard Preview
 
-### Prerequisites
+*For open-source deployment, place your screenshots in the `docs/` folder.*
 
-- Python 3.10+
-- A dedicated Polygon wallet (separate from your main wallet — never use your main wallet)
-- (Optional) Alchemy API key for on-chain balance queries
-- (Optional) Telegram bot token for alerts
+### 📊 Main Command Center
+Displays portfolio performance, available USDC balance, total harvested profit, and a dual-tab layout for the copy-trading activity log and the No-Bot scanner status:
+![Dashboard Tab 1: Specialist Copy-Bot](docs/screenshot_copy_bot.png)
+![Dashboard Tab 2: No-Bot Scanner](docs/screenshot_no_bot.png)
 
-### Local Development
-
-```bash
-git clone https://github.com/YOUR_USERNAME/polymarket-picks.git
-cd polymarket-picks
-
-python -m venv .venv
-source .venv/bin/activate      # Windows: .venv\Scripts\activate
-pip install -r requirements.txt
-
-cp .env.example .env
-# Edit .env with your values
-
-streamlit run app.py            # Dashboard only
-# python bot.py                 # Bot only (headless)
-```
-
-### Environment Variables
-
-Copy `.env.example` to `.env` and fill in your values:
-
-```env
-# Required for live balance display
-ALCHEMY_POLYGON_URL=https://polygon-mainnet.g.alchemy.com/v2/YOUR_KEY
-BOT_WALLET_ADDRESS=0xYOUR_BOT_WALLET_PUBLIC_ADDRESS
-
-# Required for live trading (when CLOB execution is wired up)
-BOT_PRIVATE_KEY=0xYOUR_BOT_WALLET_PRIVATE_KEY
-HARVEST_WALLET_ADDRESS=0xYOUR_PERSONAL_WALLET
-
-# Optional — Telegram notifications
-TELEGRAM_BOT_TOKEN=your_bot_token
-TELEGRAM_CHAT_ID=your_chat_id
-
-# Optional — disable Telegram without touching the DB
-ENABLE_TELEGRAM=true
-```
-
-### Cloud Deployment (Render / Railway)
-
-1. Push to GitHub
-2. Create a new Web Service, connect the repo
-3. Set environment variables in the platform dashboard
-4. The `Dockerfile` exposes port `8501` (Streamlit) and runs `bot.py` alongside it
-5. Any `git push` to `main` triggers an automatic redeploy
+### 👥 Specialists Roster
+Manage monitored traders, toggle active copy status, view individual win rates, and review past copied trades:
+![Specialists Roster](docs/screenshot_specialists.png)
 
 ---
 
-## Project Structure
+## ⚙️ Project Structure
 
 ```
 polymarket-picks/
-├── app.py            # Streamlit dashboard (all pages)
-├── bot.py            # Main polling loop and trade logic
-├── database.py       # SQLite wrapper (trades, specialists, config)
-├── finance.py        # Position sizing, harvest, value caps, slippage math
-├── ws_listener.py    # WebSocket listener for real-time price monitoring
-├── requirements.txt
-├── Dockerfile
-├── .env.example
-└── docs/             # Screenshots and supporting docs
+├── streamlit_app.py  # Streamlit dashboard UI (all tabs, pages, and interactive backtests)
+├── mock_data.py      # Demo Mode database seeder (generates 30 days of trading & balance history)
+├── bot.py            # Headless copy-trading executor (polls specialist wallets & checks rules)
+├── database.py       # SQLite database wrapper (schema, trades, configs, specialist roster)
+├── finance.py        # Kelly sizing algorithms, value caps, and harvest calculations
+├── ws_listener.py    # WebSocket client for real-time price monitoring
+├── requirements.txt  # Python dependencies
+├── Dockerfile        # Container recipe for deployment
+├── .env.example      # Sample environment configuration file
+└── no_bot/           # Modules for the 'Nothing Ever Happens' scanning engine
 ```
 
 ---
 
-## Adding Specialists
+## 🏗️ System Architecture
 
-From the **Dashboard → Specialist Roster**:
+The following diagram illustrates how the background execution services, database layer, and Streamlit user interface interact with the Polymarket APIs:
 
-1. Click **Add New Trader**
-2. Enter their Polymarket username and wallet address (visible on their profile URL)
-3. Select the market categories they trade
-4. Choose their tier (SHARP or WHALE)
-5. Check the vetting box — only add traders with a verified track record
+```mermaid
+graph TD
+    subgraph Polymarket CLOB & Web3
+        PM_CLOB[Polymarket CLOB API]
+        PM_WS[Polymarket WebSockets]
+        POLY_RPC[Polygon RPC Provider]
+    end
 
-The bot will start monitoring their wallet on the next poll cycle.
+    subgraph Headless Background Services
+        BOT[Copy-Trading Bot: bot.py]
+        NO_BOT[No-Bot Scanner: no_bot/scanner.py]
+        WS[WebSocket Listener: ws_listener.py]
+    end
+
+    subgraph Local Storage
+        DB[(SQLite: trading.db)]
+    end
+
+    subgraph Interactive Frontend
+        UI[Streamlit Dashboard: streamlit_app.py]
+    end
+
+    PM_WS -->|Real-time Price Feeds| WS
+    PM_CLOB -->|Track Specialist Profiles| BOT
+    POLY_RPC -->|Check Wallet Balance| BOT
+    
+    WS -->|Cache Price Updates| DB
+    BOT -->|Log Trades & Performance| DB
+    NO_BOT -->|Log Scans & Candidates| DB
+    
+    DB -->|Read State & Logs| UI
+    UI -->|Tunable Parameters & Resets| DB
+```
 
 ---
 
-## Backtesting
+## 🛠️ Installation & Setup
+
+### Option 1: Local Python Environment
+
+1. **Clone the repository**:
+   ```bash
+   git clone https://github.com/your-username/polymarket-picks.git
+   cd polymarket-picks
+   ```
+
+2. **Create a virtual environment & install dependencies**:
+   ```bash
+   python -m venv .venv
+   source .venv/bin/activate      # Windows: .venv\Scripts\activate
+   pip install -r requirements.txt
+   ```
+
+3. **Run the Dashboard in Demo Mode**:
+   ```bash
+   streamlit run streamlit_app.py
+   ```
+   *Since no `.env` file is present yet, the app will launch in **Sandbox Demo Mode** and populate mock data automatically!*
+
+4. **Go Live (Configure Real Trading)**:
+   Copy `.env.example` to `.env` and fill in your keys:
+   ```bash
+   cp .env.example .env
+   ```
+   *See the [Security & Configuration](#security--configuration) section below before adding real keys.*
+
+---
+
+### Option 2: Docker Setup (Recommended for VPS)
+
+To host the dashboard and run the background copy bot 24/7 on a remote virtual server (VPS):
+
+1. **Build the Docker Image**:
+   ```bash
+   docker build -t polymarket-picks .
+   ```
+
+2. **Run the Container**:
+   - **For Demo Mode**:
+     ```bash
+     docker run -d -p 8501:8501 -e DEMO_MODE=true polymarket-picks
+     ```
+   - **For Live Mode (with `.env` file)**:
+     ```bash
+     docker run -d -p 8501:8501 --env-file .env polymarket-picks
+     ```
+
+---
+
+## ☁️ Hosted Demo (Streamlit Community Cloud)
+
+You can host a completely free, live interactive demonstration of this dashboard using **Streamlit Community Cloud**.
+
+1. Fork this repository to your GitHub account.
+2. Visit [share.streamlit.io](https://share.streamlit.io/) and log in with your GitHub account.
+3. Click **New App**, select your forked repository, the `main` branch, and leave the main file path set to the default `streamlit_app.py`.
+4. Under **Advanced Settings**, add the environment variable:
+   ```env
+   DEMO_MODE=true
+   ```
+5. Click **Deploy**. Your live demo dashboard will be up and running in minutes!
+
+---
+
+## 🔒 Security & Configuration
+
+> [!WARNING]
+> **Keep Your Private Keys Safe**
+> - **Never** commit your `.env` file, live databases (`trading.db`), or log files to GitHub. The project's `.gitignore` is pre-configured to ignore these files, but always double-check before pushing.
+> - **Dedicated Wallet**: Never use your primary personal wallet for live bot trading. Create a new, dedicated hot wallet specifically for the bot.
+> - **Capital Buffer**: Keep only a minimal amount of USDC in the bot wallet (e.g. $50–$100 to start). Use the **2x Harvesting Rule** to automatically sweep profits to a secure, separate cold storage address.
+
+### Environment Variable Guide
+
+| Variable | Required For | Description |
+|---|---|---|
+| `DEMO_MODE` | Sandbox | Set to `true` to force demo mode (mocks all Web3 calls and pre-seeds mock data). |
+| `BOT_WALLET_ADDRESS` | Live Display | The public address of your dedicated trading bot wallet. |
+| `BOT_PRIVATE_KEY` | Live Execution | The private key of your dedicated bot wallet (required to sign transactions). |
+| `HARVEST_WALLET_ADDRESS` | Live Harvesting | The public address where 2x profit harvests will be sent. |
+| `ALCHEMY_POLYGON_URL` | Live Balance | Your Polygon RPC URL from Alchemy (to query wallet balances). |
+| `TELEGRAM_BOT_TOKEN` | Alerts (Optional) | Bot token from BotFather to receive mobile trade updates. |
+| `TELEGRAM_CHAT_ID` | Alerts (Optional) | Your chat ID to receive Telegram messages. |
+
+---
+
+## 🧪 Simulating & Backtesting
 
 ### Monte Carlo Simulator
-Runs N simulations of the strategy with configurable parameters (win rate, trades/day, slippage, fees). Produces equity fan charts, percentile outcomes, ruin rates, and probability tables.
+Simulate strategy outcomes over 7 to 365 days across hundreds of scenarios. You can configure:
+- Roster mix (number of SHARP vs. WHALE specialists).
+- Market conditions (slippage, fees, average entry price).
+- Profit harvesting triggers.
+Provides equity curves, maximum drawdown profiles, and survival probability charts.
 
-### Historical Backtest
-Fetches real trade history from the Polymarket Data API for each specialist in your roster and replays it through the bot's exact filtering logic. Shows per-specialist EV analysis and overall win rate.
-
----
-
-## Contributing
-
-Pull requests are welcome. For major changes, open an issue first to discuss.
-
-Key areas where contributions would be useful:
-- CLOB order execution (signing and submitting actual orders)
-- Conviction sizing based on specialist's relative bet size
-- Additional alert channels (Discord, email)
-- Position exit logic (take-profit triggers)
+### No-Bot Historical Backtest
+Runs a sequential simulation of the "Nothing Ever Happens" strategy on historical markets. 
+- In **Demo Mode**, the backtester generates simulated historical markets on the fly so you can test how capital constraint rules behave.
+- In **Live Mode**, download the 100MB markets database by running `python backtest/fetch_markets.py` to test against actual Polymarket historical data.
 
 ---
 
-## Disclaimer
+## ⚖️ Disclaimer & Terms of Use
 
-This software is for educational and research purposes. Prediction market trading involves substantial risk of loss. Past performance of any specialist wallet is not indicative of future results. Use at your own risk with money you can afford to lose entirely.
+This software is for educational and research purposes only. Prediction market trading involves substantial risk of financial loss. Past performance of any specialist wallet is not indicative of future results. Use this software at your own risk.
+
+Before downloading, modifying, or running this codebase, please review the complete [Terms of Use & Disclaimer](TERMS.md) for critical disclosures regarding financial risks, limitation of liability, and geographic compliance.

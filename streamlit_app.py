@@ -12,6 +12,283 @@ from finance import FinanceController
 
 load_dotenv()
 
+# --- Sandbox Demo Mode Helpers ---
+def check_and_seed_demo_mode(db):
+    import sqlite3
+    env_exists = os.path.exists(os.path.join(os.path.dirname(__file__), ".env"))
+    is_demo_env = os.environ.get("DEMO_MODE", "false").lower() == "true"
+    is_demo = is_demo_env or not env_exists
+    
+    db_empty = True
+    try:
+        conn = sqlite3.connect(db.db_path)
+        c = conn.cursor()
+        c.execute("SELECT COUNT(*) FROM trades")
+        count = c.fetchone()[0]
+        if count > 0:
+            db_empty = False
+        conn.close()
+    except Exception:
+        pass
+        
+    if is_demo and db_empty:
+        try:
+            from mock_data import seed_mock_data
+            seed_mock_data(db.db_path)
+        except Exception as e:
+            st.warning(f"Failed to auto-seed demo data: {e}")
+            
+    return is_demo
+
+def fetch_real_markets_from_api(limit=200):
+    import requests
+    import json
+    
+    # Map tag IDs to categories
+    TARGET_TAGS = {
+        "2": "Politics", "144": "Politics", "100265": "Politics", "100344": "Politics",
+        "537": "Tech-AI", "817": "Tech-AI", "267": "Tech-AI",
+        "745": "Sports-Other", "28": "Sports-Other", "100350": "Sports-Other",
+        "306": "Sports-Other", "82": "Sports-Other", "100977": "Sports-Other",
+        "100381": "Sports-Other", "678": "Sports-Other", "899": "Sports-Other",
+        "100088": "Sports-Other", "100089": "Sports-Other", "64": "Sports-Other",
+        "102366": "Sports-Other", "100639": "Sports-Other", "1": "Sports-Other"
+    }
+    
+    def get_cat(tags):
+        for t in tags:
+            tid = str(t.get("id") if isinstance(t, dict) else t)
+            if tid in TARGET_TAGS:
+                return TARGET_TAGS[tid]
+        return "Other"
+
+    def parse_outcome(m):
+        try:
+            outcomes = json.loads(m.get("outcomes", "[]")) if isinstance(m.get("outcomes"), str) else m.get("outcomes", [])
+            prices = json.loads(m.get("outcomePrices", "[]")) if isinstance(m.get("outcomePrices"), str) else m.get("outcomePrices", [])
+            if len(outcomes) == 2 and len(prices) == 2:
+                if float(prices[0]) > 0.9:
+                    return 1
+                if float(prices[1]) > 0.9:
+                    return 0
+        except Exception:
+            pass
+        return None
+
+    markets = []
+    offset = 0
+    batch = 100
+    while len(markets) < limit:
+        try:
+            resp = requests.get(
+                "https://gamma-api.polymarket.com/events",
+                params={"closed": "true", "limit": batch, "offset": offset, "order": "startDate", "ascending": "false"},
+                timeout=10
+            )
+            if resp.status_code != 200:
+                break
+            data = resp.json()
+            if not data:
+                break
+                
+            for event in data:
+                event_id = event.get("id", "")
+                event_title = event.get("title", "")
+                start_date = event.get("startDate", "")[:10]
+                end_date = event.get("endDate", "")[:10]
+                
+                # Filter category
+                category = get_cat(event.get("tags", []))
+                if category not in ("Tech-AI", "Sports-Other", "Politics"):
+                    continue
+                    
+                for market in event.get("markets", []):
+                    resolved_yes = parse_outcome(market)
+                    if resolved_yes is not None:
+                        markets.append({
+                            "id": market.get("id", ""),
+                            "question": market.get("question", ""),
+                            "event_id": event_id,
+                            "category": category,
+                            "resolved_yes": resolved_yes,
+                            "start_date": start_date,
+                            "end_date": end_date,
+                            "volume": float(market.get("volumeNum", 0) or 0),
+                            "liquidity": float(market.get("liquidityNum", 0) or 0)
+                        })
+            offset += batch
+            if len(data) < batch:
+                break
+        except Exception:
+            break
+            
+    # Sort chronologically to match simulation expectations
+    markets.sort(key=lambda m: m["start_date"])
+    return markets
+
+def generate_mock_markets(num_markets=250):
+    import random
+    categories = ["Tech-AI", "Sports-Other", "Politics"]
+    questions = {
+        "Tech-AI": [
+            "Will OpenAI release GPT-5 before July?",
+            "Will Siri integrate ChatGPT by WWDC?",
+            "Will NVIDIA release H200 early?",
+            "Will Google Gemini hit 5M developers?",
+            "Will Meta release a 500B open Llama model?",
+            "Will Anthropic launch Claude 4 in Q2?",
+            "Will xAI raise another $5B by June?",
+            "Will Microsoft replace CEO in 2026?"
+        ],
+        "Sports-Other": [
+            "Will a French rider win Tour de France?",
+            "Will any player hit 4 home runs in one game?",
+            "Will F1 Monaco GP be won by Hamilton?",
+            "Will Connor McDavid score 3 goals in his next game?",
+            "Will Novak Djokovic win French Open?",
+            "Will Rafael Nadal retire in June?",
+            "Will USA win the track & field gold medal?"
+        ],
+        "Politics": [
+            "Will US Senate pass the climate bill by August?",
+            "Will Germany hold snap elections?",
+            "Will Joe Biden visit France in June?",
+            "Will UK single market debate re-open?",
+            "Will Macron resign before July?",
+            "Will Keir Starmer visit Washington in June?",
+            "Will EU pass new AI regulation in May?"
+        ]
+    }
+    
+    random.seed(42)
+    start_base = datetime(2024, 1, 1)
+    
+    mock_markets = []
+    for i in range(num_markets):
+        cat = random.choice(categories)
+        q = random.choice(questions[cat]) + f" (Simulated Event #{i})"
+        duration = random.randint(5, 60)
+        start_days = random.randint(0, 850)
+        start_date = start_base + timedelta(days=start_days)
+        end_date = start_date + timedelta(days=duration)
+        
+        if cat == "Tech-AI":
+            no_rate = 0.77
+        elif cat == "Sports-Other":
+            no_rate = 0.70
+        else:
+            no_rate = 0.705
+            
+        resolved_yes = 0 if random.random() < no_rate else 1
+        
+        mock_markets.append({
+            "id": f"mock_market_{i}",
+            "question": q,
+            "event_id": f"mock_event_{i}",
+            "category": cat,
+            "resolved_yes": resolved_yes,
+            "start_date": start_date.strftime("%Y-%m-%d"),
+            "end_date": end_date.strftime("%Y-%m-%d"),
+            "volume": random.uniform(15000, 300000),
+            "liquidity": random.uniform(1000, 20000)
+        })
+        
+    mock_markets.sort(key=lambda m: m["start_date"])
+    return mock_markets
+
+def generate_mock_specialist_activity(wallet, cutoff_dt):
+    import random
+    random.seed(hash(wallet))
+    cutoff = cutoff_dt or (datetime.utcnow() - timedelta(days=60))
+    now = datetime.utcnow()
+    total_days = (now - cutoff).days
+    
+    activity = []
+    questions = [
+        ("Politics", "Will US Senate pass the climate bill by August?", "mock-senate-climate", "Yes"),
+        ("Politics", "Will Germany hold snap federal elections in 2026?", "mock-germany-elections", "Yes"),
+        ("NBA", "Will Boston Celtics win their next match by 10+ points?", "mock-celtics-win", "Yes"),
+        ("Sports", "Will Lakers make the playoffs?", "mock-lakers-playoffs", "Yes"),
+        ("Esports", "Will Team Liquid win the Valorant tournament?", "mock-liquid-valorant", "Yes"),
+        ("Soccer", "Will Real Madrid win UCL Final?", "mock-real-madrid-ucl", "Yes"),
+        ("Tech-AI", "Will Apple announce Siri integration with ChatGPT?", "mock-apple-siri", "Yes"),
+        ("Tech-AI", "Will NVIDIA launch H200 chips ahead of schedule?", "mock-nvidia-h200", "Yes"),
+        ("Games", "Will GTA 6 release date be delayed to 2027?", "mock-gta-6-delayed", "Yes"),
+    ]
+    
+    for i in range(25):
+        trade_days_ago = random.uniform(1, total_days)
+        trade_dt = now - timedelta(days=trade_days_ago)
+        cat, question, slug, outcome = random.choice(questions)
+        slug_with_id = f"{slug}-{i}"
+        
+        activity.append({
+            "type": "TRADE",
+            "side": "BUY",
+            "timestamp": trade_dt.isoformat() + "Z",
+            "size": str(random.choice([100, 200, 500, 1000])),
+            "price": str(round(random.uniform(0.40, 0.75), 2)),
+            "title": question,
+            "eventSlug": slug_with_id,
+            "outcome": outcome
+        })
+        
+        if random.random() < 0.3:
+            sell_days_later = random.uniform(0.1, min(3, trade_days_ago))
+            sell_dt = trade_dt + timedelta(days=sell_days_later)
+            activity.append({
+                "type": "TRADE",
+                "side": "SELL",
+                "timestamp": sell_dt.isoformat() + "Z",
+                "size": str(random.choice([50, 100])),
+                "price": str(round(random.uniform(0.40, 0.85), 2)),
+                "title": question,
+                "eventSlug": slug_with_id,
+                "outcome": outcome
+            })
+            
+    activity.sort(key=lambda x: x["timestamp"])
+    return activity
+
+def generate_mock_event_info(event_slug):
+    import random
+    random.seed(hash(event_slug))
+    last_char = event_slug[-1]
+    try:
+        num = int(last_char)
+    except ValueError:
+        num = 0
+        
+    if num == 3:
+        closed = False
+        prices = ["0.60", "0.40"]
+    elif num % 2 == 0:
+        closed = True
+        prices = ["1.0", "0.0"]
+    else:
+        closed = True
+        prices = ["0.0", "1.0"]
+        
+    tags = ["1"]
+    if "celtics" in event_slug or "lakers" in event_slug:
+        tags = ["745", "1"]
+    elif "senate" in event_slug or "germany" in event_slug:
+        tags = ["2", "1"]
+    elif "apple" in event_slug or "nvidia" in event_slug or "gpt5" in event_slug:
+        tags = ["100639", "1"]
+        
+    return {
+        "tags": tags,
+        "end_date": (datetime.utcnow() + timedelta(days=10)).strftime("%Y-%m-%d") if num == 3 else (datetime.utcnow() - timedelta(days=1)).strftime("%Y-%m-%d"),
+        "markets": [{
+            "question": "Mock Question",
+            "closed": closed,
+            "outcomes": ["Yes", "No"],
+            "outcomePrices": prices
+        }]
+    }
+
+
 DATA_API_URL = "https://data-api.polymarket.com"
 GAMMA_API_URL = "https://gamma-api.polymarket.com"
 
@@ -48,7 +325,7 @@ def _init_saved_views():
         st.session_state.saved_hb_views = []
     # MC sidebar defaults (used for pre-population when loading a saved view)
     mc_defaults = {
-        "mc_bankroll": 50.0, "mc_days": 90, "mc_num_simulations": 500,
+        "mc_bankroll": 100.0, "mc_days": 90, "mc_num_simulations": 500,
         "mc_num_sharp": 7, "mc_num_whale": 2,
         "mc_sharp_wr": 58.0, "mc_whale_wr": 48.0,
         "mc_trades_per_day": 8, "mc_avg_entry_price": 0.45,
@@ -254,6 +531,8 @@ def main():
     _init_saved_views()
     _inject_css()
     db = TradingDB()
+    is_demo = check_and_seed_demo_mode(db)
+    st.session_state["is_demo"] = is_demo
 
     st.sidebar.title("Navigation")
     page = st.sidebar.radio("Go to", [
@@ -267,6 +546,16 @@ def main():
         "Architecture & Deployment",
         "Logs",
     ])
+
+    if is_demo:
+        st.sidebar.markdown("---")
+        st.sidebar.subheader("Sandbox Options")
+        st.sidebar.caption("Running in Sandbox Demo Mode.")
+        if st.sidebar.button("🔄 Reload Demo Mock Data", help="Re-seeds the local SQLite database with fresh mock simulation data."):
+            from mock_data import seed_mock_data
+            seed_mock_data(db.db_path)
+            st.sidebar.success("Database re-seeded!")
+            st.rerun()
 
     st.sidebar.markdown("---")
     if "dark_mode" not in st.session_state:
@@ -299,7 +588,8 @@ def main():
         render_architecture()
     else:
         render_logs()
-        
+
+
 def _render_no_bot_scanner_status(conn):
     """Heartbeat strip: is the scanner alive, and what is it seeing?"""
     from datetime import datetime, timezone as _tz
@@ -427,30 +717,30 @@ def render_no_bot_positions_inline(db):
     ).fetchall()
     conn.close()
 
-    nb_cfg = db.get_all_config()
-    nb_bankroll = float(nb_cfg.get("nb_bankroll", {}).get("value", 50.0))
-    nb_live = nb_cfg.get("nb_live_mode", {}).get("value", "0") == "1"
-    mode_label = "🟢 LIVE" if nb_live else "📝 PAPER"
-
-    c1, c2, c3, c4 = st.columns(4)
     open_n = sum(1 for r in rows if r[4] == "open")
     total_pnl = sum((r[7] or 0) for r in rows if r[4] != "open")
-    c1.metric("Mode", mode_label)
-    c2.metric("Bankroll", f"${nb_bankroll:.2f}")
-    c3.metric("Open positions", open_n)
-    c4.metric("Closed P&L", f"${total_pnl:+,.2f}")
+
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Open positions", open_n)
+    c2.metric("Closed P&L", f"${total_pnl:+,.2f}")
 
     if rows:
+        import pandas as pd
         df = pd.DataFrame(rows, columns=[
             "Category", "Question", "Entry No", "Bet $", "Status",
             "Placed", "Resolved", "PnL $", "Mock"])
         st.dataframe(df, use_container_width=True, hide_index=True)
     else:
-        st.caption("No positions yet. Settings for this bot are on the **Settings → No-Bot** tab.")
+        st.caption("No positions yet.")
 
 
 def render_dashboard(db):
-    st.title("📈 Polymarket Specialist Copy-Bot")
+    is_demo = st.session_state.get("is_demo", False)
+    
+    if is_demo:
+        st.info("💡 **Sandbox Demo Mode**: The dashboard is pre-populated with realistic simulation data. Live Web3 calls are mocked, and no real transactions will be executed.")
+        
+    st.title("📈 Polymarket Specialist Copy-Bot & No-Bot Dashboard")
     
     # Use standard dotenv to grab the bot's public proxy
     bot_address = os.environ.get("BOT_WALLET_ADDRESS", "").strip("\"'")
@@ -459,85 +749,92 @@ def render_dashboard(db):
          st.markdown(f"**[🤖 View Bot's Live Polymarket Profile](https://polymarket.com/profile/{bot_address})**")
          st.markdown("---")
     
-    server_status = "🟢 LIVE" if db.is_server_alive() else "🔴 OFFLINE"
+    if is_demo:
+        server_status = "🟢 LIVE (Sandbox)"
+    else:
+        server_status = "🟢 LIVE" if db.is_server_alive() else "🔴 OFFLINE"
     st.markdown(f"**Bot Status**: {server_status}")
-    
-    baseline, harvested = db.get_performance()
-    
-    # 1. Dashboard Metrics
-    st.header("Financial Performance")
-    col1, col2, col3 = st.columns(3)
-    
-    # For Phase 1 we calculate available balance based on pending exposure
-    exposure = db.get_total_pending_exposure()
-    current_wallet_balance = 50.0 - exposure
-    profit = (current_wallet_balance + exposure) - baseline if (current_wallet_balance + exposure) > baseline else 0
-    
-    col1.metric("Current Balance (USDC)", f"${current_wallet_balance:.2f}", f"${profit:.2f} profit")
-    col2.metric("Baseline Capital", f"${baseline:.2f}")
-    col3.metric("Total Harvested (to Main Wallet)", f"${harvested:.2f}")
-    
-    st.write("")
-    if st.button("🧹 Purge All Pending Trades (Reset Simulator Budget)", help="Clears all active pending trades from the local database to reset your paper balance back to original budget."):
-        db.clear_all_pending_trades()
-        st.rerun()
-
-    # Growth vs Harvest Chart
-    st.subheader("Growth vs. Harvest")
-    balance_history = db.get_balance_history()
-    
-    if balance_history:
-        history_df = pd.DataFrame(balance_history, columns=['Date', 'Balance', 'Harvested'])
-        history_df['Date'] = pd.to_datetime(history_df['Date'])
-        history_df = history_df.groupby('Date').agg({'Balance': 'last', 'Harvested': 'sum'})
-        st.line_chart(history_df)
-    else:
-        st.info("Awaiting sufficient data to plot balance history.")
-
     st.markdown("---")
 
-    # 2. Live Activity Log
-    st.header("Live Activity Log")
-    st.write("")
-    
-    recent_trades = db.get_all_recent_trades(limit=1000)
-    col_active, col_empty = st.columns([1, 3])
-    active_positions = sum(1 for t in recent_trades if t[4] == 'PENDING') if recent_trades else 0
-    col_active.metric("Active Pending Positions", active_positions)
-    
-    if recent_trades:
-        trades_df = pd.DataFrame(recent_trades[:20], columns=['Specialist', 'Market', 'Entry Price', 'Timestamp', 'Status', 'Slug', 'Outcome', 'Bet Size', 'End Date', 'Leader Price', 'Market Price'])
-        trades_df['Entry Price'] = trades_df['Entry Price'].apply(lambda x: f"${x:.2f}")
-        trades_df['Bet Size'] = trades_df['Bet Size'].apply(lambda x: f"${x:.2f}" if x and x > 0 else "—")
-        # Make Specialist name a clickable link to their Polymarket profile
-        trades_df['Specialist'] = trades_df['Specialist'].apply(lambda x: f"https://polymarket.com/@{x}")
-        # Make Market a clickable link to the event
-        trades_df['Market Link'] = trades_df.apply(
-            lambda r: f"https://polymarket.com/event/{r['Slug']}" if r['Slug'] else "", axis=1
-        )
-        # Format end date as readable
-        trades_df['Est. Close'] = trades_df['End Date'].apply(
-            lambda x: x.split('T')[0] if x and 'T' in str(x) else (x if x else "—")
-        )
-        # Select and reorder columns
-        trades_df = trades_df[['Specialist', 'Market', 'Market Link', 'Outcome', 'Entry Price', 'Bet Size', 'Status', 'Timestamp', 'Est. Close']]
+    # Create Tabs for Copy-Bot and No-Bot
+    tab_copy, tab_no = st.tabs(["🤖 Specialist Copy-Bot", "🚫 'Nothing Ever Happens' No-Bot"])
+
+    with tab_copy:
+        baseline, harvested = db.get_performance()
         
-        st.dataframe(
-            trades_df, 
-            use_container_width=True, 
-            hide_index=True,
-            column_config={
-                "Specialist": st.column_config.LinkColumn("Specialist", display_text=r"https://polymarket\.com/@(.+)"),
-                "Market Link": st.column_config.LinkColumn("Market", display_text="Open ↗"),
-            }
-        )
-    else:
-        st.info("No trades executed yet.")
+        # 1. Dashboard Metrics
+        st.header("Financial Performance")
+        col1, col2, col3 = st.columns(3)
+        
+        # For Phase 1 we calculate available balance based on pending exposure
+        exposure = db.get_total_pending_exposure()
+        current_wallet_balance = baseline - exposure
+        profit = (current_wallet_balance + exposure) - baseline if (current_wallet_balance + exposure) > baseline else 0
+        
+        col1.metric("Current Balance (USDC)", f"${current_wallet_balance:.2f}", f"${profit:.2f} profit")
+        col2.metric("Baseline Capital", f"${baseline:.2f}")
+        col3.metric("Total Harvested (to Main Wallet)", f"${harvested:.2f}")
+        
+        st.write("")
+        if st.button("🧹 Purge All Pending Trades (Reset Simulator Budget)", help="Clears all active pending trades from the local database to reset your paper balance back to original budget."):
+            db.clear_all_pending_trades()
+            st.rerun()
 
-    st.markdown("---")
+        # Growth vs Harvest Chart
+        st.subheader("Growth vs. Harvest")
+        balance_history = db.get_balance_history()
+        
+        if balance_history:
+            history_df = pd.DataFrame(balance_history, columns=['Date', 'Balance', 'Harvested'])
+            history_df['Date'] = pd.to_datetime(history_df['Date'])
+            history_df = history_df.groupby('Date').agg({'Balance': 'last', 'Harvested': 'sum'})
+            st.line_chart(history_df)
+        else:
+            st.info("Awaiting sufficient data to plot balance history.")
 
-    # 3. No-Bot Live Positions
-    render_no_bot_positions_inline(db)
+        st.markdown("---")
+
+        # 2. Live Activity Log
+        st.header("Live Activity Log")
+        st.write("")
+        
+        recent_trades = db.get_all_recent_trades(limit=1000)
+        col_active, col_empty = st.columns([1, 3])
+        active_positions = sum(1 for t in recent_trades if t[4] == 'PENDING') if recent_trades else 0
+        col_active.metric("Active Pending Positions", active_positions)
+        
+        if recent_trades:
+            trades_df = pd.DataFrame(recent_trades[:20], columns=['Specialist', 'Market', 'Entry Price', 'Timestamp', 'Status', 'Slug', 'Outcome', 'Bet Size', 'End Date', 'Leader Price', 'Market Price'])
+            trades_df['Entry Price'] = trades_df['Entry Price'].apply(lambda x: f"${x:.2f}")
+            trades_df['Bet Size'] = trades_df['Bet Size'].apply(lambda x: f"${x:.2f}" if x and x > 0 else "—")
+            # Make Specialist name a clickable link to their Polymarket profile
+            trades_df['Specialist'] = trades_df['Specialist'].apply(lambda x: f"https://polymarket.com/@{x}")
+            # Make Market a clickable link to the event
+            trades_df['Market Link'] = trades_df.apply(
+                lambda r: f"https://polymarket.com/event/{r['Slug']}" if r['Slug'] else "", axis=1
+            )
+            # Format end date as readable
+            trades_df['Est. Close'] = trades_df['End Date'].apply(
+                lambda x: x.split('T')[0] if x and 'T' in str(x) else (x if x else "—")
+            )
+            # Select and reorder columns
+            trades_df = trades_df[['Specialist', 'Market', 'Market Link', 'Outcome', 'Entry Price', 'Bet Size', 'Status', 'Timestamp', 'Est. Close']]
+            
+            st.dataframe(
+                trades_df, 
+                use_container_width=True, 
+                hide_index=True,
+                column_config={
+                    "Specialist": st.column_config.LinkColumn("Specialist", display_text=r"https://polymarket\.com/@(.+)"),
+                    "Market Link": st.column_config.LinkColumn("Market", display_text="Open ↗"),
+                }
+            )
+        else:
+            st.info("No trades executed yet.")
+
+    with tab_no:
+        # 3. No-Bot Live Positions
+        render_no_bot_positions_inline(db)
 
     st.markdown("---")
 
@@ -1252,6 +1549,9 @@ def _fetch_specialist_activity(wallet: str, cutoff_dt: datetime = None, limit: i
     Paginates until cutoff_dt is reached (date-based) or limit records fetched (safety cap).
     This ensures heavy traders (15+ trades/day) don't run out of records before the lookback window.
     """
+    if wallet.startswith("0xmock") or st.session_state.get("is_demo", False):
+        return generate_mock_specialist_activity(wallet, cutoff_dt)
+
     all_activity = []
     offset = 0
     batch = 100
@@ -1292,6 +1592,9 @@ def _fetch_specialist_activity(wallet: str, cutoff_dt: datetime = None, limit: i
 def _lookup_event_info(event_slug: str) -> dict:
     """Look up market tags, end date, and resolution from Gamma API (cached in session state).
     Returns {"tags": [...], "end_date": "YYYY-MM-DD", "markets": [...]}."""
+    if event_slug.startswith("mock-") or st.session_state.get("is_demo", False):
+        return generate_mock_event_info(event_slug)
+
     cache_key = f"_event_info_{event_slug}"
     if cache_key in st.session_state:
         return st.session_state[cache_key]
@@ -1432,7 +1735,7 @@ def render_historical_backtest(db):
     # --- Controls ---
     st.sidebar.markdown("---")
     st.sidebar.header("Historical Backtest")
-    bankroll = st.sidebar.number_input("Starting Bankroll ($)", min_value=10.0, max_value=100000.0, value=50.0, step=10.0, key="hb_bankroll")
+    bankroll = st.sidebar.number_input("Starting Bankroll ($)", min_value=10.0, max_value=100000.0, value=100.0, step=10.0, key="hb_bankroll")
     lookback_days = st.sidebar.slider("Lookback Window (days)", 7, 180, 60, key="hb_lookback")
     enable_harvest = st.sidebar.checkbox("Enable 2x Harvest Rule", value=True, key="hb_harvest")
     min_buffer = st.sidebar.number_input("Min Buffer ($)", min_value=1.0, max_value=50.0, value=5.0, step=1.0, key="hb_buffer")
@@ -2055,9 +2358,9 @@ def render_no_bot(db):
     st.caption("Re-runs the historical sim with your chosen parameters.")
 
     markets_db = _Path(__file__).parent / "backtest" / "markets.db"
-    if not markets_db.exists():
-        st.error("`backtest/markets.db` not found. Run `python backtest/fetch_markets.py` first.")
-        return
+    has_db = markets_db.exists()
+    if not has_db:
+        st.info("💡 `backtest/markets.db` not found. Running in **Sandbox Demo Mode**: we will fetch **real historical closed markets** directly from the live Polymarket API on the fly for the backtest!")
 
     try:
         from backtest import deep_analysis as da
@@ -2079,9 +2382,18 @@ def render_no_bot(db):
 
     if st.button("Run backtest", key="nb_run"):
         with st.spinner("Loading markets and simulating..."):
-            sim_conn = sqlite3.connect(markets_db)
-            markets = da.load_markets(sim_conn)
-            sim_conn.close()
+            if has_db:
+                sim_conn = sqlite3.connect(markets_db)
+                markets = da.load_markets(sim_conn)
+                sim_conn.close()
+            else:
+                markets = fetch_real_markets_from_api(limit=250)
+                if len(markets) < 10:
+                    st.warning("⚠️ API request returned insufficient data. Falling back to generated mock markets.")
+                    markets = generate_mock_markets()
+                else:
+                    st.success(f"✅ Loaded {len(markets)} real historical markets from live Polymarket API!")
+            
             result = da.simulate(
                 markets,
                 starting_capital=capital,

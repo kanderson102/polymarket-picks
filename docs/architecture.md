@@ -10,7 +10,7 @@ This document covers the system architecture, file structure, and deployment wor
 ┌─────────────────────────────────────────────────────────────────┐
 │  Local Mac (Development)                                        │
 │  ┌──────────┐  ┌──────────┐  ┌─────────────┐  ┌───────────┐  │
-│  │  VS Code  │  │  app.py  │  │   bot.py    │  │ trading.db│  │
+│  │  VS Code  │  │  streamlit_app.py  │  │   bot.py    │  │ trading.db│  │
 │  │  Editor   │  │Streamlit │  │  Bot Daemon │  │  SQLite   │  │
 │  └──────────┘  └──────────┘  └─────────────┘  └───────────┘  │
 │         │                                                       │
@@ -28,7 +28,7 @@ This document covers the system architecture, file structure, and deployment wor
 │  ┌──────────────────────────────────────────────────────────┐  │
 │  │  Docker Container                                        │  │
 │  │  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌────────┐  │  │
-│  │  │  app.py  │  │  bot.py  │  │ws_listen │  │  .env  │  │  │
+│  │  │  streamlit_app.py  │  │  bot.py  │  │ws_listen │  │  .env  │  │  │
 │  │  │Streamlit │  │  Daemon  │  │  er.py   │  │ (keys) │  │  │
 │  │  └──────────┘  └──────────┘  └──────────┘  └────────┘  │  │
 │  │              ↕ shared trading.db                        │  │
@@ -45,7 +45,7 @@ This document covers the system architecture, file structure, and deployment wor
 
 | File | Purpose |
 |------|---------|
-| `app.py` | Streamlit dashboard — all UI, charts, settings, controls |
+| `streamlit_app.py` | Streamlit dashboard — all UI, charts, settings, controls |
 | `bot.py` | Main bot daemon — polling loop, trade logic, order execution |
 | `ws_listener.py` | WebSocket listener for real-time trade detection |
 | `database.py` | SQLite ORM — specialists, trades, config, heartbeat |
@@ -112,7 +112,7 @@ pip install -r requirements.txt
 cp .env.example .env        # fill in your values
 
 # Run the dashboard only (no live trading)
-streamlit run app.py
+streamlit run streamlit_app.py
 
 # Run the full bot (paper trading by default)
 python bot.py

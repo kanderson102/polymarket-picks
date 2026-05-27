@@ -37,7 +37,7 @@ polymarket-picks/
 │   └── db.py                  # no_trades, no_positions tables
 │
 ├── backtest/                  # unchanged
-├── app.py                     # dashboard (adds Backtest + No-bot tabs)
+├── streamlit_app.py                     # dashboard (adds Backtest + No-bot tabs)
 ├── trading.db                 # shared SQLite (copy-bot tables + no-bot tables)
 └── docs/
     ├── no-bot-strategy.md
@@ -124,7 +124,7 @@ Signal source: Polymarket WebSocket `market` channel (already wired in `ws_liste
 - **Per-category exposure cap** — no more than 40% of deployed capital in one category at once.
 - **Telegram on entry + resolution** — reuse existing alert infra.
 
-## Dashboard tab (in `app.py`)
+## Dashboard tab (in `streamlit_app.py`)
 
 New tab `"No-Bot"` with:
 - **Live positions** table (open, won, lost)
